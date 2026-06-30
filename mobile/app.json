@@ -1,0 +1,24 @@
+{
+  "expo": {
+    "name": "AI Pictionary",
+    "slug": "ai-pictionary",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "light",
+    "scheme": "aipictionary",
+    "assetBundlePatterns": [
+      "**/*"
+    ],
+    "ios": {
+      "supportsTablet": true
+    },
+    "android": {
+      "adaptiveIcon": {
+        "backgroundColor": "#FAF7F0"
+      }
+    },
+    "plugins": [
+      "expo-asset"
+    ]
+  }
+}
