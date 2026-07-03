@@ -1,0 +1,29 @@
+services:
+  backend:
+    build:
+      context: ./backend
+    ports:
+      - "8000:8000"
+    env_file:
+      - ./backend/.env
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-sqlite:////data/ai_pictionary.db}
+    volumes:
+      - ai_pictionary_data:/data
+
+  postgres:
+    image: postgres:16-alpine
+    profiles:
+      - postgres
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-ai_pictionary}
+      POSTGRES_USER: ${POSTGRES_USER:-ai_pictionary}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ai_pictionary_dev}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+volumes:
+  ai_pictionary_data:
+  postgres_data:

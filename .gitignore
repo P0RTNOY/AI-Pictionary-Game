@@ -7,3 +7,5 @@ node_modules/
 dist/
 build/
 *.pyc
+backend/ai_pictionary.db
+backend/ai_pictionary.db-*

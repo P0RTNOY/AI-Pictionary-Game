@@ -3,6 +3,9 @@
     "name": "AI Pictionary",
     "slug": "ai-pictionary",
     "version": "0.1.0",
+    "runtimeVersion": {
+      "policy": "appVersion"
+    },
     "orientation": "portrait",
     "userInterfaceStyle": "light",
     "scheme": "aipictionary",
@@ -10,15 +13,34 @@
       "**/*"
     ],
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": true,
+      "bundleIdentifier": "com.portnoy.aipictionary.beta",
+      "infoPlist": {
+        "ITSAppUsesNonExemptEncryption": false
+      }
     },
     "android": {
+      "package": "com.portnoy.aipictionary.beta",
       "adaptiveIcon": {
         "backgroundColor": "#FAF7F0"
       }
     },
     "plugins": [
-      "expo-asset"
-    ]
+      "expo-asset",
+      "expo-notifications"
+    ],
+    "extra": {
+      "appEnv": "local",
+      "buildProfile": "local",
+      "releaseChannel": "local",
+      "todo": {
+        "icon": "Replace placeholder icon before production",
+        "splash": "Add branded splash before production",
+        "bundleIdentifiers": "Replace com.portnoy.aipictionary.beta before production"
+      },
+      "eas": {
+        "projectId": "36443fdd-ae57-4284-97bb-8bc2faddb2fd"
+      }
+    }
   }
 }
