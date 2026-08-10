@@ -14,10 +14,12 @@ const colorChoices = [
 
 export function ProfileScreen({
   user,
+  lifecycleEpoch,
   onSave,
   onCancel,
 }: {
   user: User | null;
+  lifecycleEpoch: number;
   onSave: (payload: { display_name: string; avatar_emoji: string; avatar_color: string }, signal: AbortSignal) => Promise<void>;
   onCancel?: () => void;
 }) {
@@ -28,7 +30,13 @@ export function ProfileScreen({
   const saveInFlight = useRef(false);
   const saveController = useRef<AbortController | null>(null);
 
-  useEffect(() => () => saveController.current?.abort(), []);
+  useEffect(() => {
+    saveController.current?.abort();
+    saveController.current = null;
+    saveInFlight.current = false;
+    setLoading(false);
+    return () => saveController.current?.abort();
+  }, [lifecycleEpoch]);
 
   async function submit() {
     if (saveInFlight.current) return;
@@ -45,9 +53,11 @@ export function ProfileScreen({
     } catch (error) {
       if (!controller.signal.aborted) Alert.alert("Could not save profile", error instanceof Error ? error.message : "Unknown error");
     } finally {
-      if (!controller.signal.aborted) setLoading(false);
-      saveInFlight.current = false;
-      if (saveController.current === controller) saveController.current = null;
+      if (saveController.current === controller) {
+        if (!controller.signal.aborted) setLoading(false);
+        saveInFlight.current = false;
+        saveController.current = null;
+      }
     }
   }
 

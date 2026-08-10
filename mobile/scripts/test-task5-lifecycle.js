@@ -16,6 +16,16 @@ function loadTypeScriptModule(relativePath) {
   return loaded.exports;
 }
 
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((done, fail) => {
+    resolve = done;
+    reject = fail;
+  });
+  return { promise, resolve, reject };
+}
+
 async function run() {
   const { createRequestScope } = loadTypeScriptModule("src/requestScope.ts");
   const scope = createRequestScope();
@@ -34,6 +44,117 @@ async function run() {
   const resumed = scope.begin("user-a:game-b");
   assert.equal(resumed.isCurrent(), true);
   resumed.finish();
+
+  const { createLatestTargetCoordinator } = loadTypeScriptModule("src/latestTargetCoordinator.ts");
+  const targetWork = { A: deferred(), B: deferred() };
+  const targetSignals = {};
+  const acceptedTargets = [];
+  const targetCoordinator = createLatestTargetCoordinator({
+    key: (target) => target,
+    run: (target, signal) => {
+      targetSignals[target] = signal;
+      return targetWork[target].promise;
+    },
+    accept: (target) => acceptedTargets.push(target),
+    reject: () => {},
+    now: () => 0,
+  });
+  const targetA = targetCoordinator.request("A");
+  await Promise.resolve();
+  const targetB = targetCoordinator.request("B");
+  assert.equal(targetSignals.A.aborted, true, "B must supersede and abort an in-flight A open");
+  targetWork.A.resolve("old-a");
+  await targetA;
+  assert.deepEqual(acceptedTargets, [], "a retired A completion cannot navigate");
+  targetWork.B.resolve("latest-b");
+  await targetB;
+  assert.deepEqual(acceptedTargets, ["B"]);
+
+  let retryAttempt = 0;
+  const retryAccepted = [];
+  const retryCoordinator = createLatestTargetCoordinator({
+    key: (target) => target,
+    run: async () => {
+      retryAttempt += 1;
+      if (retryAttempt === 1) throw new Error("transient");
+      return "recovered";
+    },
+    accept: (target) => retryAccepted.push(target),
+    reject: () => {},
+    now: () => retryAttempt * 10_000,
+  });
+  await retryCoordinator.request("same-game-url");
+  await retryCoordinator.request("same-game-url");
+  assert.equal(retryAttempt, 2, "a transient failure must not suppress the same URL forever");
+  assert.deepEqual(retryAccepted, ["same-game-url"]);
+
+  const { createLatestOperation } = loadTypeScriptModule("src/latestOperation.ts");
+  const loadingStates = [];
+  const operation = createLatestOperation((loading) => loadingStates.push(loading));
+  const refreshA = operation.begin("user-a:game-a");
+  operation.retire();
+  assert.equal(refreshA.signal.aborted, true);
+  assert.equal(refreshA.isCurrent(), false);
+  const refreshB = operation.begin("user-a:game-b");
+  refreshA.settle();
+  assert.equal(refreshB.isCurrent(), true, "a stale completion cannot settle B's loading state");
+  refreshB.settle();
+  assert.deepEqual(loadingStates, [true, false, true, false]);
+
+  const { isActionContextCurrent } = loadTypeScriptModule("src/actionContext.ts");
+  const capturedAction = { epoch: 4, userId: "user-a", gameId: "game-a", roundId: "round-a" };
+  assert.equal(isActionContextCurrent(capturedAction, capturedAction, true), true);
+  assert.equal(
+    isActionContextCurrent(capturedAction, { ...capturedAction, epoch: 5, gameId: "game-b" }, true),
+    false,
+    "an old-game mutation must be rejected after B opens",
+  );
+  assert.equal(isActionContextCurrent(capturedAction, capturedAction, false), false, "backgrounding retires actions");
+
+  const { createRealtimeFailurePolicy } = loadTypeScriptModule("src/realtimePolicy.ts");
+  const flapPolicy = createRealtimeFailurePolicy(2);
+  const fakeSocket = {
+    open: () => flapPolicy.opened(),
+    close: () => flapPolicy.closed(),
+  };
+  fakeSocket.open();
+  assert.equal(fakeSocket.close().usePolling, false);
+  fakeSocket.open();
+  assert.equal(fakeSocket.close().usePolling, true, "repeated fake WebSocket flaps must enter polling fallback");
+  assert.equal(fakeSocket.open().usePolling, true, "a brief reopen must keep polling active until the socket proves healthy");
+  assert.equal(flapPolicy.healthy().usePolling, false);
+  assert.equal(flapPolicy.failures(), 0, "only a sustained healthy connection resets failures");
+
+  const { createAbortDeadline } = loadTypeScriptModule("src/abortDeadline.ts");
+  let deadlineCallback;
+  let deadlineCleared = 0;
+  const fakeClock = {
+    set: (callback) => {
+      deadlineCallback = callback;
+      return 41;
+    },
+    clear: () => { deadlineCleared += 1; },
+  };
+  const deadline = createAbortDeadline(undefined, 8_000, fakeClock);
+  const neverSettlingPoll = new Promise(() => {});
+  void neverSettlingPoll;
+  deadlineCallback();
+  assert.equal(deadline.didTimeout(), true, "a never-settling poll/API request is aborted by its deadline");
+  assert.equal(deadline.signal.aborted, true);
+  deadline.dispose();
+  assert.equal(deadlineCleared, 1);
+  let added = 0;
+  let removed = 0;
+  const fakeCallerSignal = {
+    aborted: false,
+    reason: undefined,
+    addEventListener: () => { added += 1; },
+    removeEventListener: () => { removed += 1; },
+  };
+  const composed = createAbortDeadline(fakeCallerSignal, 60_000);
+  composed.dispose();
+  assert.equal(added, 1);
+  assert.equal(removed, 1, "disposing a composed deadline removes its caller listener");
 
   const { parseAppLink } = loadTypeScriptModule("src/utils/deepLinks.ts");
   assert.deepEqual(parseAppLink("aipictionary://invite/abcDEF_123-xyz"), {
@@ -68,15 +189,23 @@ async function run() {
   const invite = read("src/screens/InviteScreen.tsx");
   const profile = read("src/screens/ProfileScreen.tsx");
   const createRound = read("src/screens/CreateRoundScreen.tsx");
+  const client = read("src/api/client.ts");
 
   assert.match(app, /createRequestScope/);
   assert.match(app, /AppStateStatus/);
   assert.match(app, /pendingGameId/);
+  assert.match(app, /createLatestTargetCoordinator/);
+  assert.match(app, /retireActionWork/);
+  assert.match(app, /selectedRefreshOperation\.retire/);
   assert.match(app, /request\.signal/);
   assert.match(events, /userId/);
   assert.match(events, /connectionGeneration/);
   assert.match(events, /pollTimer/);
   assert.match(events, /AbortController/);
+  assert.match(events, /failurePolicy\.healthy/);
+  assert.match(events, /POLL_TIMEOUT_MS/);
+  assert.match(client, /DEFAULT_API_TIMEOUT_MS/);
+  assert.match(client, /createAbortDeadline/);
   assert.match(gamesApi, /signal\?: AbortSignal/);
   assert.match(roundsApi, /signal\?: AbortSignal/);
   for (const source of [waiting, guess, result]) {
@@ -85,6 +214,8 @@ async function run() {
   }
   for (const source of [waiting, guess, invite, profile, createRound]) {
     assert.match(source, /useRef/);
+    assert.match(source, /lifecycleEpoch/);
+    assert.match(source, /Controller\.current === controller/);
   }
 
   console.log("task5 lifecycle checks passed");

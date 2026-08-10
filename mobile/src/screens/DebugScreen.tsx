@@ -1,5 +1,5 @@
 import * as Clipboard from "expo-clipboard";
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Alert, ScrollView, Text, View } from "react-native";
 import { Bell, ClipboardCopy, RefreshCw, Trash2 } from "lucide-react-native";
 import { API_URL } from "../api/client";
@@ -31,6 +31,7 @@ export function DebugScreen({
   onResetLocalState,
   onBackendResetComplete,
   aiStatus,
+  lifecycleEpoch,
   info,
 }: {
   user: User;
@@ -42,6 +43,7 @@ export function DebugScreen({
   onResetLocalState: () => Promise<void>;
   onBackendResetComplete: () => Promise<void>;
   aiStatus: AIStatus | null;
+  lifecycleEpoch: number;
   info: DebugInfo;
 }) {
   const [sending, setSending] = useState(false);
@@ -49,6 +51,24 @@ export function DebugScreen({
   const [backendResetting, setBackendResetting] = useState(false);
   const sendInFlight = useRef(false);
   const resetDialogOpen = useRef(false);
+  const sendController = useRef<AbortController | null>(null);
+  const resetController = useRef<AbortController | null>(null);
+
+  useEffect(() => {
+    sendController.current?.abort();
+    resetController.current?.abort();
+    sendController.current = null;
+    resetController.current = null;
+    sendInFlight.current = false;
+    resetDialogOpen.current = false;
+    setSending(false);
+    setLocalResetting(false);
+    setBackendResetting(false);
+    return () => {
+      sendController.current?.abort();
+      resetController.current?.abort();
+    };
+  }, [lifecycleEpoch]);
 
   async function copy() {
     await Clipboard.setStringAsync(
@@ -81,9 +101,12 @@ export function DebugScreen({
   async function sendPush() {
     if (sendInFlight.current) return;
     sendInFlight.current = true;
+    const controller = new AbortController();
+    sendController.current = controller;
     setSending(true);
     try {
-      const result = await sendTestNotification(user.id, selectedGameId);
+      const result = await sendTestNotification(user.id, selectedGameId, controller.signal);
+      if (controller.signal.aborted) return;
       Alert.alert(
         "Test notification queued",
         result.active_device_tokens
@@ -91,10 +114,13 @@ export function DebugScreen({
           : "No active device token is registered yet. Check notification permission and token status.",
       );
     } catch (error) {
-      Alert.alert("Could not send test notification", error instanceof Error ? error.message : "Unknown error");
+      if (!controller.signal.aborted) Alert.alert("Could not send test notification", error instanceof Error ? error.message : "Unknown error");
     } finally {
-      sendInFlight.current = false;
-      setSending(false);
+      if (sendController.current === controller) {
+        sendInFlight.current = false;
+        if (!controller.signal.aborted) setSending(false);
+        sendController.current = null;
+      }
     }
   }
 
@@ -138,16 +164,22 @@ export function DebugScreen({
           text: "Reset",
           style: "destructive",
           onPress: async () => {
+            const controller = new AbortController();
+            resetController.current = controller;
             setBackendResetting(true);
             try {
-              const res = await resetBackendData();
+              const res = await resetBackendData(controller.signal);
+              if (controller.signal.aborted) return;
               await onBackendResetComplete();
               Alert.alert("Backend reset successful", `Deleted ${res.deleted_rows} local rows. This device returned to onboarding.`);
             } catch (error) {
-              Alert.alert("Could not reset backend", error instanceof Error ? error.message : "Unknown error");
+              if (!controller.signal.aborted) Alert.alert("Could not reset backend", error instanceof Error ? error.message : "Unknown error");
             } finally {
-              resetDialogOpen.current = false;
-              setBackendResetting(false);
+              if (resetController.current === controller) {
+                resetDialogOpen.current = false;
+                if (!controller.signal.aborted) setBackendResetting(false);
+                resetController.current = null;
+              }
             }
           },
         },

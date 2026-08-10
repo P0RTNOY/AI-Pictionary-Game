@@ -14,11 +14,13 @@ export function GuessScreen({
   round,
   gameId,
   userId,
+  lifecycleEpoch,
   onResult,
 }: {
   round: Round;
   gameId: string;
   userId: string;
+  lifecycleEpoch: number;
   onResult: (result: GuessResult) => void;
 }) {
   const submitInFlight = useRef(false);
@@ -30,7 +32,14 @@ export function GuessScreen({
   const readySketches = useMemo(() => round.generated_svgs.filter((svg) => svg.status === "done" && svg.svg_text), [round]);
   const visibleSketches = readySketches.slice(0, visibleCount);
 
-  useEffect(() => () => submitController.current?.abort(), []);
+  useEffect(() => {
+    submitController.current?.abort();
+    submitController.current = null;
+    submitInFlight.current = false;
+    confirmationOpen.current = false;
+    setLoading(false);
+    return () => submitController.current?.abort();
+  }, [lifecycleEpoch]);
 
   if (round.game_id && round.game_id !== gameId) {
     return (
@@ -71,9 +80,11 @@ export function GuessScreen({
     } catch (error) {
       if (!controller.signal.aborted) Alert.alert("Could not score guess", error instanceof Error ? error.message : "Unknown error");
     } finally {
-      if (!controller.signal.aborted) setLoading(false);
-      submitInFlight.current = false;
-      if (submitController.current === controller) submitController.current = null;
+      if (submitController.current === controller) {
+        if (!controller.signal.aborted) setLoading(false);
+        submitInFlight.current = false;
+        submitController.current = null;
+      }
     }
   }
 

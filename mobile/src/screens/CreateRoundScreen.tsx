@@ -13,10 +13,12 @@ const promptKeys: (keyof PromptParts)[] = ["character", "action", "setting", "tw
 export function CreateRoundScreen({
   game,
   userId,
+  lifecycleEpoch,
   onCreated,
 }: {
   game: Game;
   userId: string;
+  lifecycleEpoch: number;
   onCreated: (round: Round) => void;
 }) {
   const [parts, setParts] = useState(randomPromptParts());
@@ -25,7 +27,13 @@ export function CreateRoundScreen({
   const submitInFlight = useRef(false);
   const submitController = useRef<AbortController | null>(null);
 
-  useEffect(() => () => submitController.current?.abort(), []);
+  useEffect(() => {
+    submitController.current?.abort();
+    submitController.current = null;
+    submitInFlight.current = false;
+    setLoading(false);
+    return () => submitController.current?.abort();
+  }, [lifecycleEpoch]);
 
   function updatePart(key: keyof PromptParts, value: string) {
     const next = { ...parts, [key]: value };
@@ -70,9 +78,11 @@ export function CreateRoundScreen({
       captureError(error, { area: "round_create", gameId: game.id, creatorUserId: userId });
       if (!controller.signal.aborted) Alert.alert("Could not create round", error instanceof Error ? error.message : "Unknown error");
     } finally {
-      if (!controller.signal.aborted) setLoading(false);
-      submitInFlight.current = false;
-      if (submitController.current === controller) submitController.current = null;
+      if (submitController.current === controller) {
+        if (!controller.signal.aborted) setLoading(false);
+        submitInFlight.current = false;
+        submitController.current = null;
+      }
     }
   }
 

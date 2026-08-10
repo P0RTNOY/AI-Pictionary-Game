@@ -28,12 +28,17 @@ import { captureError, captureMessage } from "./src/utils/errorReporter";
 import { decideSessionBootstrap, restoredSessionDestination } from "./src/sessionBootstrap";
 import { createSessionEpoch } from "./src/sessionEpoch";
 import { createRequestScope } from "./src/requestScope";
+import { createLatestTargetCoordinator, type LatestTargetCoordinator } from "./src/latestTargetCoordinator";
+import { createLatestOperation } from "./src/latestOperation";
+import { isActionContextCurrent, type ActionContext } from "./src/actionContext";
 
 type Screen = "onboarding" | "home" | "profile_setup" | "edit_profile" | "invites" | "create_round" | "waiting" | "guess" | "result" | "debug" | "startup_error";
 
 const USER_ID_KEY = "ai-pictionary:user-id";
 const SESSION_TOKEN_KEY = "ai-pictionary:session-token";
 const ONBOARDING_KEY = "ai-pictionary:onboarding-complete";
+
+type GameOpenTarget = { gameId: string; userId: string; sessionEpoch: number };
 
 export default function App() {
   const [screen, setScreen] = useState<Screen>("home");
@@ -58,22 +63,56 @@ export default function App() {
   const [sessionAccessToken, setSessionAccessToken] = useState<string | null>(null);
   const [appState, setAppState] = useState<AppStateStatus>(AppState.currentState);
   const [openingGameId, setOpeningGameId] = useState<string | null>(null);
-  const lastHandledUrl = useRef<string | null>(null);
+  const [actionLifecycleEpoch, setActionLifecycleEpoch] = useState(0);
   const sessionEpoch = useRef(createSessionEpoch()).current;
   const identityRequests = useRef(createRequestScope()).current;
   const gameRequests = useRef(createRequestScope()).current;
   const userRef = useRef<User | null>(null);
   const selectedGameRef = useRef<Game | null>(null);
+  const selectedRoundRef = useRef<Round | null>(null);
   const screenRef = useRef<Screen>(screen);
   const openingGameRef = useRef<string | null>(null);
   const mountedRef = useRef(true);
   const gamesRefreshGeneration = useRef(0);
-  const selectedRefreshGeneration = useRef(0);
   const statsRefreshGeneration = useRef(0);
+  const actionLifecycleEpochRef = useRef(0);
+  const selectedRefreshOperation = useRef(createLatestOperation(setSelectedGameLoading)).current;
+  const gameOpenCoordinatorRef = useRef<LatestTargetCoordinator<GameOpenTarget, Game> | null>(null);
   userRef.current = user;
   selectedGameRef.current = selectedGame;
+  selectedRoundRef.current = selectedRound;
   screenRef.current = screen;
   const appIsActive = appState === "active";
+  const renderedActionContext: ActionContext = {
+    epoch: actionLifecycleEpoch,
+    userId: user?.id ?? null,
+    gameId: selectedGame?.id ?? null,
+    roundId: selectedRound?.id ?? selectedGame?.latest_round?.id ?? null,
+  };
+
+  if (!gameOpenCoordinatorRef.current) {
+    gameOpenCoordinatorRef.current = createLatestTargetCoordinator<GameOpenTarget, Game>({
+      key: (target) => `${target.sessionEpoch}:${target.userId}:${target.gameId}`,
+      run: async (target, signal) => {
+        retireActionWork();
+        retireGameWork();
+        openingGameRef.current = target.gameId;
+        setPendingGameId(target.gameId);
+        setOpeningGameId(target.gameId);
+        return getGame(target.gameId, signal);
+      },
+      accept: (target, game) => {
+        if (!isGameOpenTargetCurrent(target)) return;
+        clearGameOpenState(target.gameId);
+        openGame(game);
+      },
+      reject: (target, error) => {
+        if (!isGameOpenTargetCurrent(target)) return;
+        clearGameOpenState(target.gameId);
+        Alert.alert("Could not open game", friendlyGameLinkError(error));
+      },
+    });
+  }
 
   useEffect(() => {
     ensureLocalUser();
@@ -83,6 +122,8 @@ export default function App() {
       mountedRef.current = false;
       identityRequests.retire();
       gameRequests.retire();
+      selectedRefreshOperation.retire();
+      gameOpenCoordinatorRef.current?.retire();
     };
   }, []);
 
@@ -108,6 +149,7 @@ export default function App() {
   useEffect(() => {
     if (!selectedGame || !user || !appIsActive) {
       gameRequests.retire();
+      selectedRefreshOperation.retire();
       return;
     }
     gameRequests.activate(gameScopeKey(user.id, selectedGame.id));
@@ -119,9 +161,7 @@ export default function App() {
 
   useEffect(() => {
     if (!user || !pendingGameId || !appIsActive) return;
-    const gameId = pendingGameId;
-    setPendingGameId(null);
-    void openGameById(gameId);
+    void openGameById(pendingGameId);
   }, [user?.id, pendingGameId, appIsActive]);
 
   useEffect(() => {
@@ -142,6 +182,9 @@ export default function App() {
       } else {
         identityRequests.retire();
         gameRequests.retire();
+        selectedRefreshOperation.retire();
+        gameOpenCoordinatorRef.current?.retire();
+        retireActionWork();
         openingGameRef.current = null;
         setOpeningGameId(null);
       }
@@ -164,25 +207,13 @@ export default function App() {
         setPendingGameId(gameId);
         return;
       }
-      if (openingGameRef.current) return;
-      openingGameRef.current = gameId;
-      setOpeningGameId(gameId);
-      const capturedEpoch = sessionEpoch.capture();
-      identityRequests.activate(activeUser.id);
-      const request = identityRequests.begin(activeUser.id);
-      try {
-        const game = await getGame(gameId, request.signal);
-        if (request.isCurrent()) sessionEpoch.runIfCurrent(capturedEpoch, () => openGame(game));
-      } catch (error) {
-        if (request.isCurrent()) {
-          sessionEpoch.runIfCurrent(capturedEpoch, () => Alert.alert("Could not open game", friendlyGameLinkError(error)));
-        }
-      } finally {
-        request.finish();
-        if (openingGameRef.current === gameId) {
-          openingGameRef.current = null;
-          if (mountedRef.current) setOpeningGameId(null);
-        }
+      await gameOpenCoordinatorRef.current?.request({
+        gameId,
+        userId: activeUser.id,
+        sessionEpoch: sessionEpoch.capture(),
+      });
+      if (openingGameRef.current !== gameId) {
+        setPendingGameId((pending) => (pending === gameId ? null : pending));
       }
     },
     [],
@@ -237,6 +268,7 @@ export default function App() {
       if (!sessionEpoch.isCurrent(capturedEpoch) || !request.isCurrent()) return;
       sessionEpoch.activate();
       identityRequests.activate(existing.id);
+      userRef.current = existing;
       setSessionAccessToken(storedToken);
       setUser(existing);
       setStartupError(null);
@@ -286,8 +318,6 @@ export default function App() {
   }
 
   function handleIncomingUrl(url: string | null) {
-    if (!url || lastHandledUrl.current === url) return;
-    lastHandledUrl.current = url;
     const link = parseAppLink(url);
     if (!link) return;
     captureMessage("App deep link received", { area: "deep_link", kind: link.kind });
@@ -295,18 +325,19 @@ export default function App() {
       setPendingGameId(null);
       setPendingInviteCode(link.code);
       if (userRef.current) {
-        gameRequests.retire();
+        gameOpenCoordinatorRef.current?.retire();
+        retireActionWork();
+        retireGameWork();
         selectedGameRef.current = null;
+        selectedRoundRef.current = null;
         setSelectedGame(null);
         setSelectedRound(null);
         setScreen("invites");
       }
     } else {
       setPendingInviteCode(null);
-      setPendingGameId(link.gameId);
-      if (userRef.current) {
-        gameRequests.retire();
-      }
+      if (userRef.current && AppState.currentState === "active") void openGameById(link.gameId);
+      else setPendingGameId(link.gameId);
     }
   }
 
@@ -336,30 +367,27 @@ export default function App() {
   async function refreshSelectedGame(gameId: string, userId: string) {
     if (AppState.currentState !== "active") return;
     const capturedEpoch = sessionEpoch.capture();
-    const generation = ++selectedRefreshGeneration.current;
     const key = gameScopeKey(userId, gameId);
-    gameRequests.activate(key);
-    const request = gameRequests.begin(key);
-    setSelectedGameLoading(true);
+    const request = selectedRefreshOperation.begin(key);
     setSelectedGameError(null);
     try {
       const latest = await getGame(gameId, request.signal);
-      if (!sessionEpoch.isCurrent(capturedEpoch) || !request.isCurrent() || generation !== selectedRefreshGeneration.current) return;
+      if (!sessionEpoch.isCurrent(capturedEpoch) || !request.isCurrent()) return;
+      if (selectedGameRef.current?.id !== gameId || userRef.current?.id !== userId) return;
+      selectedGameRef.current = latest;
+      selectedRoundRef.current = latest.latest_round;
       setSelectedGame(latest);
       setSelectedRound(latest.latest_round);
       void refreshStats(gameId, userId);
       routeForGame(latest, false);
       captureMessage("Selected game refreshed", { area: "navigation", gameId, target: screenRef.current });
     } catch (error) {
-      if (!sessionEpoch.isCurrent(capturedEpoch) || !request.isCurrent() || generation !== selectedRefreshGeneration.current) return;
+      if (!sessionEpoch.isCurrent(capturedEpoch) || !request.isCurrent()) return;
       captureError(error, { area: "selected_game_refresh", gameId, userId });
       setSelectedGameError(getErrorMessage(error));
       setScreen("waiting");
     } finally {
-      if (generation === selectedRefreshGeneration.current) {
-        request.runIfCurrent(() => sessionEpoch.runIfCurrent(capturedEpoch, () => setSelectedGameLoading(false)));
-      }
-      request.finish();
+      request.settle();
     }
   }
 
@@ -381,8 +409,10 @@ export default function App() {
   function openGame(game: Game) {
     const activeUser = userRef.current;
     if (!activeUser) return;
+    retireGameWork();
     gameRequests.activate(gameScopeKey(activeUser.id, game.id));
     selectedGameRef.current = game;
+    selectedRoundRef.current = game.latest_round;
     setSelectedGame(game);
     setSelectedRound(game.latest_round);
     setSelectedStats(null);
@@ -424,9 +454,12 @@ export default function App() {
   async function retireSessionAndResetClient(unregisterPush: boolean) {
     sessionEpoch.retire();
     identityRequests.retire();
-    gameRequests.retire();
+    gameOpenCoordinatorRef.current?.retire();
+    retireActionWork();
+    retireGameWork();
     userRef.current = null;
     selectedGameRef.current = null;
+    selectedRoundRef.current = null;
     setSessionRetiring(true);
     let resetError: unknown = null;
     try {
@@ -449,6 +482,7 @@ export default function App() {
       setSessionAccessToken(null);
       setUser(null);
       selectedGameRef.current = null;
+      selectedRoundRef.current = null;
       setSelectedGame(null);
       setSelectedRound(null);
       setSelectedStats(null);
@@ -462,30 +496,29 @@ export default function App() {
       setStartupError(null);
       openingGameRef.current = null;
       setOpeningGameId(null);
-      lastHandledUrl.current = null;
       setScreen("onboarding");
       setSessionRetiring(false);
     }
     if (resetError) throw resetError;
   }
 
-  async function handleInviteJoined(game: Game) {
+  async function handleInviteJoined(capturedContext: ActionContext, game: Game) {
+    if (!actionContextIsCurrent(capturedContext)) return;
     const capturedEpoch = sessionEpoch.capture();
     setPendingInviteCode(null);
-    if (!user) return;
-    identityRequests.activate(user.id);
-    const request = identityRequests.begin(user.id);
+    const activeUser = userRef.current;
+    if (!activeUser) return;
+    const request = selectedRefreshOperation.begin(gameScopeKey(activeUser.id, game.id));
     captureMessage("Invite join response", {
       area: "invite_join",
       gameId: game.id,
       currentTurnUserId: game.current_turn_user_id,
       latestRoundId: game.latest_round?.id ?? null,
     });
-    setSelectedGameLoading(true);
     setSelectedGameError(null);
     try {
-      const [joinedGame, refreshedGames] = await Promise.all([getGame(game.id, request.signal), listGames(user.id, request.signal)]);
-      if (!sessionEpoch.isCurrent(capturedEpoch) || !request.isCurrent()) return;
+      const [joinedGame, refreshedGames] = await Promise.all([getGame(game.id, request.signal), listGames(activeUser.id, request.signal)]);
+      if (!sessionEpoch.isCurrent(capturedEpoch) || !request.isCurrent() || !actionContextIsCurrent(capturedContext)) return;
       captureMessage("Games refreshed after invite join", { area: "invite_join", gameId: game.id, count: refreshedGames.length });
       setGames(refreshedGames);
       openGame(joinedGame);
@@ -496,43 +529,53 @@ export default function App() {
         currentTurnUserId: joinedGame.current_turn_user_id,
       });
     } catch (error) {
-      if (!sessionEpoch.isCurrent(capturedEpoch) || !request.isCurrent()) return;
-      captureError(error, { area: "invite_join_fetch_game", gameId: game.id, userId: user.id });
+      if (!sessionEpoch.isCurrent(capturedEpoch) || !request.isCurrent() || !actionContextIsCurrent(capturedContext)) return;
+      captureError(error, { area: "invite_join_fetch_game", gameId: game.id, userId: activeUser.id });
       openGame(game);
       setSelectedGameError(getErrorMessage(error));
       setScreen("waiting");
-      refreshGames(user.id);
+      refreshGames(activeUser.id);
     } finally {
-      request.runIfCurrent(() => sessionEpoch.runIfCurrent(capturedEpoch, () => setSelectedGameLoading(false)));
-      request.finish();
+      request.settle();
     }
   }
 
-  function handleRoundCreated(round: Round) {
+  function handleRoundCreated(round: Round, capturedContext: ActionContext) {
+    if (!actionContextIsCurrent(capturedContext) || round.game_id !== capturedContext.gameId) return;
+    selectedRoundRef.current = round;
     setSelectedRound(round);
     setSelectedGame((game) => (game ? { ...game, latest_round: round } : game));
     setScreen("waiting");
   }
 
-  function handleRoundRetry(round: Round) {
+  function handleRoundRetry(round: Round, capturedContext: ActionContext) {
+    if (!actionContextIsCurrent(capturedContext) || round.id !== capturedContext.roundId || round.game_id !== capturedContext.gameId) return;
+    selectedRoundRef.current = round;
     setSelectedRound(round);
     setSelectedGame((game) => (game ? { ...game, latest_round: round } : game));
     setScreen("waiting");
   }
 
-  function handleGuessResult(result: GuessResult) {
-    if (!selectedRound) return;
-    const updatedRound: Round = { ...selectedRound, status: "guessed", guess: result, completed_at: result.created_at };
+  function handleGuessResult(result: GuessResult, capturedContext: ActionContext) {
+    const activeRound = selectedRoundRef.current;
+    const activeGame = selectedGameRef.current;
+    const activeUser = userRef.current;
+    if (!activeRound || !activeGame || !activeUser || !actionContextIsCurrent(capturedContext) || result.round_id !== capturedContext.roundId) return;
+    const updatedRound: Round = { ...activeRound, status: "guessed", guess: result, completed_at: result.created_at };
+    selectedRoundRef.current = updatedRound;
     setSelectedRound(updatedRound);
-    setSelectedGame((game) => (game ? { ...game, latest_round: updatedRound, current_turn_user_id: user?.id ?? game.current_turn_user_id } : game));
-    if (selectedGame && user) refreshStats(selectedGame.id, user.id);
+    setSelectedGame((game) => (game ? { ...game, latest_round: updatedRound, current_turn_user_id: activeUser.id } : game));
+    void refreshStats(activeGame.id, activeUser.id);
     setScreen("result");
   }
 
   function goHome() {
     if (user) refreshGames(user.id);
-    gameRequests.retire();
+    gameOpenCoordinatorRef.current?.retire();
+    retireActionWork();
+    retireGameWork();
     selectedGameRef.current = null;
+    selectedRoundRef.current = null;
     setSelectedGame(null);
     setSelectedRound(null);
     setSelectedStats(null);
@@ -542,7 +585,7 @@ export default function App() {
 
   function goBack() {
     if (screen === "invites" || screen === "edit_profile" || screen === "debug") {
-      setScreen("home");
+      goHome();
       return;
     }
     goHome();
@@ -551,6 +594,47 @@ export default function App() {
   async function completeOnboarding() {
     await AsyncStorage.setItem(ONBOARDING_KEY, "1");
     setScreen(user ? (pendingInviteCode ? "invites" : "home") : "profile_setup");
+  }
+
+  function retireActionWork() {
+    const nextEpoch = actionLifecycleEpochRef.current + 1;
+    actionLifecycleEpochRef.current = nextEpoch;
+    if (mountedRef.current) setActionLifecycleEpoch(nextEpoch);
+  }
+
+  function retireGameWork() {
+    gameRequests.retire();
+    selectedRefreshOperation.retire();
+    statsRefreshGeneration.current += 1;
+  }
+
+  function currentActionContext(): ActionContext {
+    return {
+      epoch: actionLifecycleEpochRef.current,
+      userId: userRef.current?.id ?? null,
+      gameId: selectedGameRef.current?.id ?? null,
+      roundId: selectedRoundRef.current?.id ?? selectedGameRef.current?.latest_round?.id ?? null,
+    };
+  }
+
+  function actionContextIsCurrent(capturedContext: ActionContext) {
+    return isActionContextCurrent(capturedContext, currentActionContext(), AppState.currentState === "active");
+  }
+
+  function isGameOpenTargetCurrent(target: GameOpenTarget) {
+    return (
+      AppState.currentState === "active" &&
+      userRef.current?.id === target.userId &&
+      sessionEpoch.isCurrent(target.sessionEpoch)
+    );
+  }
+
+  function clearGameOpenState(gameId: string) {
+    setPendingGameId((pending) => (pending === gameId ? null : pending));
+    if (openingGameRef.current === gameId) {
+      openingGameRef.current = null;
+      if (mountedRef.current) setOpeningGameId(null);
+    }
   }
 
   return (
@@ -562,6 +646,7 @@ export default function App() {
         {screen === "profile_setup" && (
           <ProfileScreen
             user={null}
+            lifecycleEpoch={actionLifecycleEpoch}
             onSave={async (payload, signal) => {
               const session = await createUser(payload.display_name, payload.avatar_emoji, payload.avatar_color, signal);
               if (signal.aborted) return;
@@ -569,9 +654,11 @@ export default function App() {
                 AsyncStorage.setItem(USER_ID_KEY, session.user.id),
                 AsyncStorage.setItem(SESSION_TOKEN_KEY, session.access_token),
               ]);
+              if (signal.aborted) return;
               configureApiCredential(session.access_token);
               sessionEpoch.activate();
               identityRequests.activate(session.user.id);
+              userRef.current = session.user;
               setSessionAccessToken(session.access_token);
               setUser(session.user);
               setScreen(pendingInviteCode ? "invites" : "home");
@@ -591,10 +678,14 @@ export default function App() {
         {user && screen === "edit_profile" && (
           <ProfileScreen
             user={user}
-            onCancel={() => setScreen("home")}
+            lifecycleEpoch={actionLifecycleEpoch}
+            onCancel={() => {
+              goHome();
+            }}
             onSave={async (payload, signal) => {
               const updated = await updateUser(user.id, payload, signal);
               if (signal.aborted) return;
+              userRef.current = updated;
               setUser(updated);
               setScreen("home");
             }}
@@ -628,6 +719,7 @@ export default function App() {
             onResetLocalState={handleLocalStateReset}
             onBackendResetComplete={handleBackendDataReset}
             aiStatus={aiStatus}
+            lifecycleEpoch={actionLifecycleEpoch}
             info={{
               realtimeConnected: realtimeStatus.connected,
               fallbackPolling: realtimeStatus.fallbackPolling,
@@ -644,9 +736,10 @@ export default function App() {
         {user && screen === "invites" && (
           <InviteScreen
             userId={user.id}
+            lifecycleEpoch={actionLifecycleEpoch}
             initialCode={pendingInviteCode}
             onInitialCodeHandled={() => setPendingInviteCode(null)}
-            onJoined={handleInviteJoined}
+            onJoined={(game) => handleInviteJoined(renderedActionContext, game)}
           />
         )}
         {user && screen === "waiting" && selectedGame && !selectedLatestRound && (
@@ -661,16 +754,32 @@ export default function App() {
         {user && screen === "waiting" && !selectedGame && (
           <GamePendingScreen game={null} loading={selectedGameLoading} error={selectedGameError || "No game is selected."} onRetry={goHome} onHome={goHome} />
         )}
-        {user && selectedGame && screen === "create_round" && <CreateRoundScreen game={selectedGame} userId={user.id} onCreated={handleRoundCreated} />}
+        {user && selectedGame && screen === "create_round" && (
+          <CreateRoundScreen
+            game={selectedGame}
+            userId={user.id}
+            lifecycleEpoch={actionLifecycleEpoch}
+            onCreated={(round) => handleRoundCreated(round, renderedActionContext)}
+          />
+        )}
         {user && selectedLatestRound && screen === "waiting" && (
           <WaitingScreen
             round={selectedLatestRound}
             userId={user.id}
-            onRetry={handleRoundRetry}
+            lifecycleEpoch={actionLifecycleEpoch}
+            onRetry={(round) => handleRoundRetry(round, renderedActionContext)}
             onContinue={() => setScreen("guess")}
           />
         )}
-        {user && selectedLatestRound && selectedGame && screen === "guess" && <GuessScreen round={selectedLatestRound} gameId={selectedGame.id} userId={user.id} onResult={handleGuessResult} />}
+        {user && selectedLatestRound && selectedGame && screen === "guess" && (
+          <GuessScreen
+            round={selectedLatestRound}
+            gameId={selectedGame.id}
+            userId={user.id}
+            lifecycleEpoch={actionLifecycleEpoch}
+            onResult={(result) => handleGuessResult(result, renderedActionContext)}
+          />
+        )}
         {selectedLatestRound && screen === "result" && (
           <ResultScreen
             round={selectedLatestRound}

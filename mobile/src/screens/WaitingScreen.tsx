@@ -10,11 +10,13 @@ import { artifactProvider, isMockArtifact } from "../utils/providerProvenance";
 export function WaitingScreen({
   round,
   userId,
+  lifecycleEpoch,
   onRetry,
   onContinue,
 }: {
   round: Round;
   userId: string;
+  lifecycleEpoch: number;
   onRetry: (round: Round) => void;
   onContinue: () => void;
 }) {
@@ -27,6 +29,14 @@ export function WaitingScreen({
   const canContinue = round.status === "ready_to_guess" && readyCount > 0 && round.guesser_user_id === userId;
 
   useEffect(() => {
+    retryController.current?.abort();
+    retryController.current = null;
+    retryInFlight.current = false;
+    setLoading(false);
+    return () => retryController.current?.abort();
+  }, [lifecycleEpoch]);
+
+  useEffect(() => {
     const animation = Animated.loop(
       Animated.sequence([
         Animated.timing(pulse, { toValue: 1, duration: 700, useNativeDriver: true }),
@@ -36,7 +46,6 @@ export function WaitingScreen({
     animation.start();
     return () => {
       animation.stop();
-      retryController.current?.abort();
     };
   }, [pulse]);
 
@@ -53,9 +62,11 @@ export function WaitingScreen({
     } catch (error) {
       if (!controller.signal.aborted) Alert.alert("Could not retry artists", error instanceof Error ? error.message : "Unknown error");
     } finally {
-      if (!controller.signal.aborted) setLoading(false);
-      retryInFlight.current = false;
-      if (retryController.current === controller) retryController.current = null;
+      if (retryController.current === controller) {
+        if (!controller.signal.aborted) setLoading(false);
+        retryInFlight.current = false;
+        retryController.current = null;
+      }
     }
   }
 

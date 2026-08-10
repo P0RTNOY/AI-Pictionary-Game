@@ -4,11 +4,14 @@ import { listEvents } from "../api/games";
 import { createWebSocketTicket } from "../api/websocketTickets";
 import type { GameEvent } from "../types/game";
 import { captureError, captureMessage } from "../utils/errorReporter";
+import { createRealtimeFailurePolicy } from "../realtimePolicy";
 
 const MAX_RECONNECT_DELAY_MS = 10_000;
 const POLL_DELAY_MS = 2_500;
 const FALLBACK_AFTER_FAILURES = 2;
 const CONNECT_TIMEOUT_MS = 8_000;
+const POLL_TIMEOUT_MS = 8_000;
+const HEALTHY_CONNECTION_MS = 15_000;
 
 function wsUrl(gameId: string, ticket: string, afterId: number) {
   const base = API_URL.replace(/^http/, "ws");
@@ -55,11 +58,12 @@ export function useGameEvents({
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
     let pollTimer: ReturnType<typeof setTimeout> | null = null;
     let socketDeadlineTimer: ReturnType<typeof setTimeout> | null = null;
-    let failures = 0;
+    let healthyTimer: ReturnType<typeof setTimeout> | null = null;
     let pollInFlight = false;
     let pollingEnabled = false;
     const ticketControllers = new Set<AbortController>();
     const pollControllers = new Set<AbortController>();
+    const failurePolicy = createRealtimeFailurePolicy(FALLBACK_AFTER_FAILURES);
     const isCurrent = () => !closed && generation === connectionGeneration.current;
 
     function emitDedup(events: GameEvent[]) {
@@ -82,6 +86,7 @@ export function useGameEvents({
         if (!isCurrent() || !pollingEnabled || pollInFlight) return schedulePoll();
         pollInFlight = true;
         const controller = new AbortController();
+        const pollDeadline = setTimeout(() => controller.abort(), POLL_TIMEOUT_MS);
         pollControllers.add(controller);
         try {
           const events = await listEvents(activeGameId, lastId.current, controller.signal);
@@ -91,6 +96,7 @@ export function useGameEvents({
             captureError(error, { area: "event_polling", gameId: activeGameId });
           }
         } finally {
+          clearTimeout(pollDeadline);
           pollControllers.delete(controller);
           pollInFlight = false;
           schedulePoll();
@@ -105,9 +111,18 @@ export function useGameEvents({
       schedulePoll();
     }
 
+    function leaveFallback() {
+      pollingEnabled = false;
+      setFallbackPolling(false);
+      if (pollTimer) clearTimeout(pollTimer);
+      pollTimer = null;
+      for (const controller of pollControllers) controller.abort();
+      pollControllers.clear();
+    }
+
     function scheduleReconnect() {
       if (!isCurrent() || reconnectTimer) return;
-      const delay = Math.min(1_000 * 2 ** Math.min(failures, 4), MAX_RECONNECT_DELAY_MS);
+      const delay = Math.min(1_000 * 2 ** Math.min(failurePolicy.failures(), 4), MAX_RECONNECT_DELAY_MS);
       reconnectTimer = setTimeout(() => {
         reconnectTimer = null;
         void connect();
@@ -127,24 +142,25 @@ export function useGameEvents({
         socketDeadlineTimer = setTimeout(() => {
           if (!isCurrent() || socket !== candidate || candidate.readyState === WebSocket.OPEN) return;
           socket = null;
-          failures += 1;
+          const failure = failurePolicy.failed();
           candidate.close();
           setConnected(false);
-          if (failures >= FALLBACK_AFTER_FAILURES) enterFallback();
+          if (failure.usePolling) enterFallback();
           scheduleReconnect();
         }, CONNECT_TIMEOUT_MS);
         candidate.onopen = () => {
           if (!isCurrent() || socket !== candidate) return candidate.close();
           if (socketDeadlineTimer) clearTimeout(socketDeadlineTimer);
           socketDeadlineTimer = null;
-          failures = 0;
+          const openingState = failurePolicy.opened();
           setConnected(true);
-          setFallbackPolling(false);
-          pollingEnabled = false;
-          if (pollTimer) clearTimeout(pollTimer);
-          pollTimer = null;
-          for (const controller of pollControllers) controller.abort();
-          pollControllers.clear();
+          if (!openingState.usePolling) leaveFallback();
+          if (healthyTimer) clearTimeout(healthyTimer);
+          healthyTimer = setTimeout(() => {
+            if (!isCurrent() || socket !== candidate || candidate.readyState !== WebSocket.OPEN) return;
+            failurePolicy.healthy();
+            leaveFallback();
+          }, HEALTHY_CONNECTION_MS);
         };
         candidate.onmessage = (message) => {
           if (!isCurrent() || socket !== candidate) return;
@@ -163,18 +179,20 @@ export function useGameEvents({
           if (!isCurrent() || socket !== candidate) return;
           if (socketDeadlineTimer) clearTimeout(socketDeadlineTimer);
           socketDeadlineTimer = null;
+          if (healthyTimer) clearTimeout(healthyTimer);
+          healthyTimer = null;
           socket = null;
-          failures += 1;
+          const failure = failurePolicy.closed();
           setConnected(false);
-          if (failures >= FALLBACK_AFTER_FAILURES) enterFallback();
+          if (failure.usePolling) enterFallback();
           scheduleReconnect();
         };
       } catch (error) {
         if (!isCurrent()) return;
-        failures += 1;
+        const failure = failurePolicy.failed();
         setConnected(false);
-        if (failures >= FALLBACK_AFTER_FAILURES) enterFallback();
-        captureError(error, { area: "websocket_ticket", gameId: activeGameId, failures });
+        if (failure.usePolling) enterFallback();
+        captureError(error, { area: "websocket_ticket", gameId: activeGameId, failures: failure.failures });
         scheduleReconnect();
       } finally {
         clearTimeout(ticketDeadline);
@@ -194,6 +212,7 @@ export function useGameEvents({
       if (reconnectTimer) clearTimeout(reconnectTimer);
       if (pollTimer) clearTimeout(pollTimer);
       if (socketDeadlineTimer) clearTimeout(socketDeadlineTimer);
+      if (healthyTimer) clearTimeout(healthyTimer);
       socket?.close();
     };
   }, [enabled, gameId, userId]);

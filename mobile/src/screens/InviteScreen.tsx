@@ -11,11 +11,13 @@ import { captureError, captureMessage } from "../utils/errorReporter";
 
 export function InviteScreen({
   userId,
+  lifecycleEpoch,
   initialCode,
   onInitialCodeHandled,
   onJoined,
 }: {
   userId: string;
+  lifecycleEpoch: number;
   initialCode?: string | null;
   onInitialCodeHandled?: () => void;
   onJoined: (game: Game) => void;
@@ -31,12 +33,27 @@ export function InviteScreen({
   const lookupController = useRef<AbortController | null>(null);
   const refreshController = useRef<AbortController | null>(null);
   const lookupGeneration = useRef(0);
+  const actionGeneration = useRef(0);
 
-  useEffect(() => () => {
+  useEffect(() => {
     actionController.current?.abort();
     lookupController.current?.abort();
     refreshController.current?.abort();
-  }, []);
+    actionController.current = null;
+    lookupController.current = null;
+    refreshController.current = null;
+    actionInFlight.current = false;
+    actionGeneration.current += 1;
+    lookupGeneration.current += 1;
+    setBusyAction(null);
+    setRefreshingInvite(false);
+    setCheckingInvite(false);
+    return () => {
+      actionController.current?.abort();
+      lookupController.current?.abort();
+      refreshController.current?.abort();
+    };
+  }, [lifecycleEpoch]);
 
   useEffect(() => {
     if (!initialCode) return;
@@ -58,6 +75,7 @@ export function InviteScreen({
   async function create() {
     if (actionInFlight.current) return;
     actionInFlight.current = true;
+    actionGeneration.current += 1;
     const controller = new AbortController();
     actionController.current = controller;
     setBusyAction("create");
@@ -70,9 +88,11 @@ export function InviteScreen({
         Alert.alert("Could not create invite", error instanceof Error ? error.message : "Unknown error");
       }
     } finally {
-      if (!controller.signal.aborted) setBusyAction(null);
-      actionInFlight.current = false;
-      if (actionController.current === controller) actionController.current = null;
+      if (actionController.current === controller) {
+        if (!controller.signal.aborted) setBusyAction(null);
+        actionInFlight.current = false;
+        actionController.current = null;
+      }
     }
   }
 
@@ -91,6 +111,7 @@ export function InviteScreen({
   async function shareInvite() {
     if (!invite || actionInFlight.current) return;
     actionInFlight.current = true;
+    const generation = ++actionGeneration.current;
     setBusyAction("share");
     try {
       await Share.share({
@@ -98,8 +119,10 @@ export function InviteScreen({
       });
       void refreshCreatedInvite(true);
     } finally {
-      actionInFlight.current = false;
-      setBusyAction(null);
+      if (generation === actionGeneration.current) {
+        actionInFlight.current = false;
+        setBusyAction(null);
+      }
     }
   }
 
@@ -149,6 +172,7 @@ export function InviteScreen({
   async function join() {
     if (!joinCode.trim() || actionInFlight.current) return;
     actionInFlight.current = true;
+    actionGeneration.current += 1;
     const controller = new AbortController();
     actionController.current = controller;
     setBusyAction("join");
@@ -165,9 +189,11 @@ export function InviteScreen({
         Alert.alert("Could not join invite", friendlyInviteError(error));
       }
     } finally {
-      if (!controller.signal.aborted) setBusyAction(null);
-      actionInFlight.current = false;
-      if (actionController.current === controller) actionController.current = null;
+      if (actionController.current === controller) {
+        if (!controller.signal.aborted) setBusyAction(null);
+        actionInFlight.current = false;
+        actionController.current = null;
+      }
     }
   }
 
