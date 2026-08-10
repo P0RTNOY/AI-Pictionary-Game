@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 import httpx
@@ -257,6 +258,9 @@ async def test_idle_websocket_observes_client_disconnect_without_waiting_for_an_
             self.accepted = False
             self.sent = []
             self.receive_calls = 0
+            self.cancelled_receives = 0
+            self.active_receive_tasks = 0
+            self.close_calls = 0
 
         async def accept(self):
             self.accepted = True
@@ -266,20 +270,42 @@ async def test_idle_websocket_observes_client_disconnect_without_waiting_for_an_
 
         async def receive(self):
             self.receive_calls += 1
-            return {"type": "websocket.disconnect", "code": 1000}
+            receive_number = self.receive_calls
+            self.active_receive_tasks += 1
+            try:
+                if receive_number == 1:
+                    try:
+                        await asyncio.Future()
+                    except asyncio.CancelledError:
+                        self.cancelled_receives += 1
+                        raise
+                return {"type": "websocket.disconnect", "code": 1000}
+            finally:
+                self.active_receive_tasks -= 1
 
         async def close(self, code):
-            raise AssertionError(f"an accepted graceful disconnect must not be closed again: {code}")
+            self.close_calls += 1
 
     websocket = DisconnectingWebSocket()
+    event_polls = 0
+
+    def list_no_events(db, game_id, after_id, user_id):
+        nonlocal event_polls
+        event_polls += 1
+        return []
+
     monkeypatch.setattr(services, "SessionLocal", EmptySession)
     monkeypatch.setattr(services, "consume_websocket_ticket", lambda db, ticket, game_id: "player-id")
-    monkeypatch.setattr(services, "list_events", lambda db, game_id, after_id, user_id: [])
+    monkeypatch.setattr(services, "list_events", list_no_events)
 
-    await asyncio.wait_for(game_events_websocket(websocket, "game-id"), timeout=0.2)
+    await asyncio.wait_for(game_events_websocket(websocket, "game-id"), timeout=2.0)
 
     assert websocket.accepted is True
-    assert websocket.receive_calls == 1
+    assert event_polls == 2
+    assert websocket.receive_calls == 2
+    assert websocket.cancelled_receives == 1
+    assert websocket.active_receive_tasks == 0
+    assert websocket.close_calls == 0
     assert websocket.sent == [
         {"type": "connected", "game_id": "game-id", "after_id": 0}
     ]
@@ -372,44 +398,57 @@ async def test_local_provider_failures_end_in_stable_retryable_round_state(
 
 
 def test_missing_local_provider_configuration_does_not_block_startup_and_retry_recovers(
-    client,
     monkeypatch,
 ):
+    startup_entered = False
+    original_lifespan = app.router.lifespan_context
+
+    @asynccontextmanager
+    async def observed_lifespan(application):
+        nonlocal startup_entered
+        async with original_lifespan(application) as state:
+            startup_entered = True
+            yield state
+
+    monkeypatch.setattr(app.router, "lifespan_context", observed_lifespan)
     monkeypatch.setenv("AI_PROVIDER", "local")
     monkeypatch.delenv("LOCAL_MODEL_BASE_URL", raising=False)
     monkeypatch.delenv("LOCAL_MODEL_NAME", raising=False)
 
-    assert client.get("/health").json() == {"status": "ok"}
-    status = client.get("/ai/status")
-    assert status.status_code == 200
-    assert status.json()["runtime_provider"] == "local"
-    assert status.json()["local_model_configured"] is False
+    with TestClient(app) as client:
+        assert startup_entered is True
+        assert client.get("/health").json() == {"status": "ok"}
+        status = client.get("/ai/status")
+        assert status.status_code == 200
+        assert status.json()["runtime_provider"] == "local"
+        assert status.json()["local_model_configured"] is False
 
-    creator, creator_token = onboard(client, "Retry Creator")
-    guesser, guesser_token = onboard(client, "Retry Guesser")
-    game = create_joined_game(client, creator, creator_token, guesser, guesser_token)
-    created = client.post(
-        f"/games/{game['id']}/rounds",
-        headers=bearer(creator_token),
-        json={"prompt": "a fox building a radio", "creator_user_id": creator["id"]},
-    )
-    assert created.status_code == 201
-    round_id = created.json()["id"]
-    failed = client.get(f"/rounds/{round_id}", headers=bearer(creator_token))
-    assert failed.json()["status"] == "failed"
-    assert {svg["provider_used"] for svg in failed.json()["generated_svgs"]} == {None}
+        creator, creator_token = onboard(client, "Retry Creator")
+        guesser, guesser_token = onboard(client, "Retry Guesser")
+        game = create_joined_game(client, creator, creator_token, guesser, guesser_token)
+        created = client.post(
+            f"/games/{game['id']}/rounds",
+            headers=bearer(creator_token),
+            json={"prompt": "a fox building a radio", "creator_user_id": creator["id"]},
+        )
+        assert created.status_code == 201
+        round_id = created.json()["id"]
+        failed = client.get(f"/rounds/{round_id}", headers=bearer(creator_token))
+        assert failed.json()["status"] == "failed"
+        assert {svg["provider_used"] for svg in failed.json()["generated_svgs"]} == {None}
 
-    monkeypatch.setenv("AI_PROVIDER", "mock")
-    retried = client.post(
-        f"/rounds/{round_id}/retry-generation",
-        headers=bearer(creator_token),
-        json={"user_id": creator["id"]},
-    )
-    assert retried.status_code == 200
-    recovered = client.get(f"/rounds/{round_id}", headers=bearer(creator_token))
-    assert recovered.json()["status"] == "ready_to_guess"
-    assert {svg["provider_used"] for svg in recovered.json()["generated_svgs"]} == {"mock"}
-    assert all(svg["attempts"] == 2 for svg in recovered.json()["generated_svgs"])
+        monkeypatch.setenv("AI_PROVIDER", "mock")
+        retried = client.post(
+            f"/rounds/{round_id}/retry-generation",
+            headers=bearer(creator_token),
+            json={"user_id": creator["id"]},
+        )
+        assert retried.status_code == 200
+        recovered = client.get(f"/rounds/{round_id}", headers=bearer(creator_token))
+        assert recovered.json()["status"] == "ready_to_guess"
+        assert {svg["provider_used"] for svg in recovered.json()["generated_svgs"]} == {"mock"}
+        assert all(svg["attempts"] == 2 for svg in recovered.json()["generated_svgs"])
+    assert startup_entered is True
 
 
 def test_in_process_alembic_upgrade_preserves_existing_application_loggers(tmp_path, monkeypatch):
