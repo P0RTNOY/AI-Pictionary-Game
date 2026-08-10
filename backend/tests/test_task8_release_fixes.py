@@ -168,6 +168,55 @@ def test_backend_container_contains_explicit_migration_runtime():
     assert "alembic upgrade head" not in dockerfile
 
 
+@pytest.mark.parametrize(
+    ("environment_name", "expected_provider"),
+    [("local", "mock"), ("test", "mock"), ("staging", "expo"), ("production", "expo"), ("unknown", "expo")],
+)
+def test_notification_provider_has_environment_safe_default(environment_name, expected_provider):
+    environment = os.environ.copy()
+    environment["ENV"] = environment_name
+    environment.pop("NOTIFICATION_PROVIDER", None)
+    environment["PYTHONPATH"] = str(Path(__file__).parents[1])
+    completed = subprocess.run(
+        [sys.executable, "-c", "from app.config import NOTIFICATION_PROVIDER; print(NOTIFICATION_PROVIDER)"],
+        cwd=Path(__file__).parents[1],
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.strip() == expected_provider
+
+
+def test_unknown_notification_provider_fails_configuration():
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "ENV": "staging",
+            "NOTIFICATION_PROVIDER": "exop",
+            "PYTHONPATH": str(Path(__file__).parents[1]),
+        }
+    )
+    completed = subprocess.run(
+        [sys.executable, "-c", "import app.config"],
+        cwd=Path(__file__).parents[1],
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert completed.returncode != 0
+    assert "NOTIFICATION_PROVIDER must be one of: expo, mock" in completed.stderr
+
+
+def test_health_exposes_effective_notification_provider_without_credentials():
+    with TestClient(app) as client:
+        response = client.get("/health")
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok", "notification_provider": "mock"}
+
+
 def test_reveal_clue_is_guesser_only_bounded_and_guess_ignores_client_count(db_session):
     creator, guesser, round_record = _ready_round(db_session)
 

@@ -43,7 +43,12 @@ if DEBUG:
 else:
     CORS_ALLOW_ORIGINS = [origin for origin in CORS_ALLOW_ORIGINS if origin != "*"]
 
-NOTIFICATION_PROVIDER = os.getenv("NOTIFICATION_PROVIDER", "mock").lower()
+NOTIFICATION_PROVIDER = os.getenv(
+    "NOTIFICATION_PROVIDER",
+    "mock" if is_local_env(ENV) else "expo",
+).lower()
+if NOTIFICATION_PROVIDER not in {"mock", "expo"}:
+    raise ValueError("NOTIFICATION_PROVIDER must be one of: expo, mock")
 EXPO_ACCESS_TOKEN = os.getenv("EXPO_ACCESS_TOKEN", "")
 
 INVITE_ATTEMPT_LIMIT = parse_positive_int("INVITE_ATTEMPT_LIMIT", 20)

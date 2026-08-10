@@ -93,7 +93,9 @@ class ExpoPushNotificationProvider:
 def get_notification_provider() -> NotificationProvider:
     if NOTIFICATION_PROVIDER == "expo":
         return ExpoPushNotificationProvider()
-    return MockNotificationProvider()
+    if NOTIFICATION_PROVIDER == "mock":
+        return MockNotificationProvider()
+    raise ValueError("NOTIFICATION_PROVIDER must be one of: expo, mock")
 
 
 def notify_user(

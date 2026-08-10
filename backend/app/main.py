@@ -16,7 +16,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.orm import Session
 
 from app.ai import get_ai_status
-from app.config import CORS_ALLOW_ORIGINS, DEBUG, ENV, is_local_env
+from app.config import CORS_ALLOW_ORIGINS, DEBUG, ENV, NOTIFICATION_PROVIDER, is_local_env
 from app.db import get_db, init_db
 from app.models import (
     AIStatus,
@@ -132,7 +132,7 @@ async def request_context_middleware(request: Request, call_next):
 
 @app.get("/health")
 def health() -> dict[str, str]:
-    return {"status": "ok"}
+    return {"status": "ok", "notification_provider": NOTIFICATION_PROVIDER}
 
 
 def require_debug() -> None:
