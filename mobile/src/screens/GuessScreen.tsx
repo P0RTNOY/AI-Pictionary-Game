@@ -53,7 +53,7 @@ export function GuessScreen({
       submitController.current?.abort();
       revealController.current?.abort();
     };
-  }, [lifecycleEpoch]);
+  }, [lifecycleEpoch, round.id]);
 
   if (round.game_id && round.game_id !== gameId) {
     return (

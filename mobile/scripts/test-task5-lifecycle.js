@@ -284,6 +284,7 @@ async function run() {
   assert.match(guess, /round\.clue_reveal_count/);
   assert.match(guess, /revealClue/);
   assert.match(guess, /revealInFlight/);
+  assert.match(guess, /\[lifecycleEpoch, round\.id\]/);
   for (const source of [waiting, guess, result]) {
     assert.match(source, /Mock output — testing only/);
     assert.doesNotMatch(source, /isDev && isMock/);
