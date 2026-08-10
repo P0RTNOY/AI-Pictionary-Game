@@ -147,7 +147,8 @@ Run with two fresh sessions after a safe local/test reset or against isolated st
 - Create a prompt; confirm only the creator can read it before the result.
 - Confirm all three artifact rows persist the actual `provider_used`.
 - In mock mode, waiting/guess/result screens show **Mock output — testing only**.
-- Reveal clues and verify each reveal is persisted before display. Reopen/background the round and confirm the count is retained, then submit one guess. Confirm the app shows **Scoring guess** while judging, the server-stored count determines the penalty and score components, duplicate submission is rejected, and a controlled judge failure returns the round to a retryable state.
+- Reveal clues and verify each reveal is persisted before display. Reopen/background the round and confirm the count is retained, then submit one guess. Confirm the app stays on the Guess screen with read-only **Scoring your guess** progress while judging, the server-stored count determines the penalty and score components, duplicate submission/reveal is blocked, and a controlled judge failure returns the round to a retryable state.
+- With the general client timeout left at its 15-second default, exercise a judge response that takes longer than 15 seconds but less than the backend's 35-second provider bound. Guess submission has a 45-second endpoint deadline and must reach Result. Also simulate losing the HTTP response after `judging_started`; the later `round.scored` event/poll refresh must still open Result. Reopening an older completed game must retain normal next-turn/wait routing instead of trapping the user on its result.
 - Confirm turn change, create a second round on device B, and complete it.
 - Confirm game statistics, Home grouping, activity, and badges update on both devices.
 - Switch rapidly between two games; stale fetch/poll completions must not overwrite the selected game.

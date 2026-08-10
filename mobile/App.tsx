@@ -32,8 +32,9 @@ import { createLatestTargetCoordinator, type LatestTargetCoordinator } from "./s
 import { createLatestOperation } from "./src/latestOperation";
 import { createActionContextGuard, isActionContextCurrent, type ActionContext } from "./src/actionContext";
 import { retireGameOpenState, type GameOpenRetirementMode } from "./src/gameOpenState";
+import { decideGameRoute, type GameScreen } from "./src/roundLifecycle";
 
-type Screen = "onboarding" | "home" | "profile_setup" | "edit_profile" | "invites" | "create_round" | "waiting" | "guess" | "result" | "debug" | "startup_error";
+type Screen = GameScreen;
 
 const USER_ID_KEY = "ai-pictionary:user-id";
 const SESSION_TOKEN_KEY = "ai-pictionary:session-token";
@@ -79,6 +80,7 @@ export default function App() {
   const statsRefreshGeneration = useRef(0);
   const actionLifecycleEpochRef = useRef(0);
   const gameOpenRetirementGenerationRef = useRef(0);
+  const observedGuessRoundIdRef = useRef<string | null>(null);
   const selectedRefreshOperation = useRef(createLatestOperation(setSelectedGameLoading)).current;
   const gameOpenCoordinatorRef = useRef<LatestTargetCoordinator<GameOpenTarget, Game> | null>(null);
   userRef.current = user;
@@ -411,6 +413,7 @@ export default function App() {
     const activeUser = userRef.current;
     if (!activeUser) return;
     retireGameWork();
+    observedGuessRoundIdRef.current = null;
     gameRequests.activate(gameScopeKey(activeUser.id, game.id));
     selectedGameRef.current = game;
     selectedRoundRef.current = game.latest_round;
@@ -425,27 +428,16 @@ export default function App() {
   function routeForGame(game: Game, force: boolean) {
     const activeUser = userRef.current;
     if (!activeUser) return;
-    const latest = game.latest_round;
-    if (!latest || latest.status === "guessed") {
-      if (game.current_turn_user_id === activeUser.id) setScreen("create_round");
-      else setScreen(force ? "waiting" : screenRef.current);
-      return;
-    }
-    if (latest.status === "failed") {
-      setScreen("waiting");
-      return;
-    }
-    if (latest.status === "generating") {
-      setScreen("waiting");
-      return;
-    }
-    if (latest.status === "judging") {
-      setScreen("waiting");
-      return;
-    }
-    if (latest.status === "ready_to_guess") {
-      setScreen(latest.guesser_user_id === activeUser.id ? "guess" : "waiting");
-    }
+    const decision = decideGameRoute({
+      latestRound: game.latest_round,
+      currentTurnUserId: game.current_turn_user_id,
+      userId: activeUser.id,
+      currentScreen: screenRef.current,
+      force,
+      observedGuessRoundId: observedGuessRoundIdRef.current,
+    });
+    observedGuessRoundIdRef.current = decision.observedGuessRoundId;
+    setScreen(decision.screen);
   }
 
   async function handleLocalStateReset() {
@@ -488,6 +480,7 @@ export default function App() {
       setUser(null);
       selectedGameRef.current = null;
       selectedRoundRef.current = null;
+      observedGuessRoundIdRef.current = null;
       setSelectedGame(null);
       setSelectedRound(null);
       setSelectedStats(null);
@@ -549,6 +542,7 @@ export default function App() {
   function handleRoundCreated(round: Round, capturedContext: ActionContext) {
     if (!actionContextIsCurrent(capturedContext) || round.game_id !== capturedContext.gameId) return;
     selectedRoundRef.current = round;
+    observedGuessRoundIdRef.current = null;
     setSelectedRound(round);
     setSelectedGame((game) => (game ? { ...game, latest_round: round } : game));
     setScreen("waiting");
@@ -568,6 +562,7 @@ export default function App() {
     const activeUser = userRef.current;
     if (!activeRound || !activeGame || !activeUser || !actionContextIsCurrent(capturedContext) || result.round_id !== capturedContext.roundId) return;
     const updatedRound: Round = { ...activeRound, status: "guessed", guess: result, completed_at: result.created_at };
+    observedGuessRoundIdRef.current = activeRound.id;
     selectedRoundRef.current = updatedRound;
     setSelectedRound(updatedRound);
     setSelectedGame((game) => (game ? { ...game, latest_round: updatedRound, current_turn_user_id: activeUser.id } : game));
@@ -582,6 +577,7 @@ export default function App() {
     retireGameWork();
     selectedGameRef.current = null;
     selectedRoundRef.current = null;
+    observedGuessRoundIdRef.current = null;
     setSelectedGame(null);
     setSelectedRound(null);
     setSelectedStats(null);
@@ -595,6 +591,11 @@ export default function App() {
       return;
     }
     goHome();
+  }
+
+  function goToNextRound() {
+    observedGuessRoundIdRef.current = null;
+    setScreen("create_round");
   }
 
   async function completeOnboarding() {
@@ -824,7 +825,7 @@ export default function App() {
           <ResultScreen
             round={selectedLatestRound}
             canCreateNext={Boolean(user && selectedGame?.current_turn_user_id === user.id)}
-            onNext={() => setScreen("create_round")}
+            onNext={goToNextRound}
             stats={selectedStats}
             userId={user?.id}
           />

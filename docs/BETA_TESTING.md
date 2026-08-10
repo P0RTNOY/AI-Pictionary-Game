@@ -106,7 +106,7 @@ For a deterministic reset, use an already-authenticated app while the backend is
 8. Submit a distinctive manual prompt from the creator.
 9. Confirm the creator continues to see that prompt while the guesser never sees the original prompt before scoring.
 10. In mock mode, confirm every artifact view shows the prominent **Mock output — testing only** warning and the persisted round provider is `mock`.
-11. Reveal another clue, leave and reopen the round, and confirm the same number remains visible. Submit a guess, confirm **Scoring guess** appears during judging, inspect the persisted clue count/penalty and score components, and confirm the turn switches. The backend owns the count; changing a client guess payload cannot reduce the penalty. A controlled judge failure should restore the round so the guess can be retried.
+11. Reveal another clue, leave and reopen the round, and confirm the same number remains visible. Submit a guess, confirm the Guess screen becomes read-only and shows **Scoring your guess** during judging, inspect the persisted clue count/penalty and score components, and confirm the turn switches. The result must also open when the HTTP response is lost but the scored event/poll refresh arrives. The backend owns the count; changing a client guess payload cannot reduce the penalty. A controlled judge failure should restore the round so the guess can be retried.
 12. Create and complete a second round from the other player.
 
 Do not use prompt bodies or backend logs as tracing evidence. Prompt telemetry is intentionally redacted. Use round IDs, game IDs, event IDs, the **AI provider** row, and persisted artifact provenance instead.

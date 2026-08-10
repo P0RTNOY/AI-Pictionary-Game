@@ -198,6 +198,48 @@ async function run() {
   assert.equal(realtimeCursor.setIdentity("game-b", "user-b"), true);
   assert.equal(realtimeCursor.afterId(), 0, "user change resets cursor");
 
+  const roundLifecyclePath = path.join(root, "src/roundLifecycle.ts");
+  assert.equal(fs.existsSync(roundLifecyclePath), true, "round lifecycle routing must be modeled independently");
+  const { decideGameRoute, isGuessInteractionAllowed } = loadTypeScriptModule("src/roundLifecycle.ts");
+  const readyRoute = decideGameRoute({
+    latestRound: { id: "round-a", status: "ready_to_guess", guesser_user_id: "user-a" },
+    currentTurnUserId: "user-b",
+    userId: "user-a",
+    currentScreen: "waiting",
+    force: true,
+    observedGuessRoundId: null,
+  });
+  assert.deepEqual(readyRoute, { screen: "guess", observedGuessRoundId: "round-a" });
+  const judgingRoute = decideGameRoute({
+    latestRound: { id: "round-a", status: "judging", guesser_user_id: "user-a" },
+    currentTurnUserId: "user-b",
+    userId: "user-a",
+    currentScreen: readyRoute.screen,
+    force: false,
+    observedGuessRoundId: readyRoute.observedGuessRoundId,
+  });
+  assert.deepEqual(judgingRoute, { screen: "guess", observedGuessRoundId: "round-a" }, "judging_started must keep the guess request mounted");
+  const scoredAfterLostResponse = decideGameRoute({
+    latestRound: { id: "round-a", status: "guessed", guesser_user_id: "user-a" },
+    currentTurnUserId: "user-a",
+    userId: "user-a",
+    currentScreen: judgingRoute.screen,
+    force: false,
+    observedGuessRoundId: judgingRoute.observedGuessRoundId,
+  });
+  assert.deepEqual(scoredAfterLostResponse, { screen: "result", observedGuessRoundId: "round-a" }, "round.scored refresh must reach Result without the HTTP response");
+  const reopenedCompleted = decideGameRoute({
+    latestRound: { id: "old-round", status: "guessed", guesser_user_id: "user-a" },
+    currentTurnUserId: "user-a",
+    userId: "user-a",
+    currentScreen: "home",
+    force: true,
+    observedGuessRoundId: null,
+  });
+  assert.deepEqual(reopenedCompleted, { screen: "create_round", observedGuessRoundId: null }, "reopening an old completed game must not trap the user on Result");
+  assert.equal(isGuessInteractionAllowed("ready_to_guess"), true);
+  assert.equal(isGuessInteractionAllowed("judging"), false, "judging must block duplicate guesses and clue reveals");
+
   const { createAbortDeadline } = loadTypeScriptModule("src/abortDeadline.ts");
   let deadlineCallback;
   let deadlineCleared = 0;
@@ -228,6 +270,19 @@ async function run() {
   composed.dispose();
   assert.equal(added, 1);
   assert.equal(removed, 1, "disposing a composed deadline removes its caller listener");
+  const callerController = new AbortController();
+  const callerAbortedDeadline = createAbortDeadline(callerController.signal, 45_000);
+  callerController.abort(new Error("backgrounded"));
+  assert.equal(callerAbortedDeadline.signal.aborted, true, "the caller can still abort a request with an endpoint deadline");
+  assert.equal(callerAbortedDeadline.didTimeout(), false, "caller abort must not be reported as an endpoint timeout");
+  callerAbortedDeadline.dispose();
+
+  const requestTimeoutsPath = path.join(root, "src/requestTimeouts.ts");
+  assert.equal(fs.existsSync(requestTimeoutsPath), true, "submit-guess must declare its longer endpoint deadline");
+  const { JUDGE_PROVIDER_TIMEOUT_MS, SUBMIT_GUESS_TIMEOUT_MS } = loadTypeScriptModule("src/requestTimeouts.ts");
+  assert.equal(JUDGE_PROVIDER_TIMEOUT_MS, 35_000);
+  assert.equal(SUBMIT_GUESS_TIMEOUT_MS, 45_000);
+  assert.ok(SUBMIT_GUESS_TIMEOUT_MS > JUDGE_PROVIDER_TIMEOUT_MS, "the client must not detach before a valid slow judge finishes");
 
   const { parseAppLink } = loadTypeScriptModule("src/utils/deepLinks.ts");
   assert.deepEqual(parseAppLink("aipictionary://invite/abcDEF_123-xyz"), {
@@ -281,6 +336,8 @@ async function run() {
   const profile = read("src/screens/ProfileScreen.tsx");
   const createRound = read("src/screens/CreateRoundScreen.tsx");
   const client = read("src/api/client.ts");
+  const roundLifecycle = read("src/roundLifecycle.ts");
+  const requestTimeouts = read("src/requestTimeouts.ts");
   const gameTypes = read("src/types/game.ts");
   const statusPill = read("src/components/StatusPill.tsx");
 
@@ -295,7 +352,8 @@ async function run() {
   assert.match(app, /createActionContextGuard/);
   assert.match(app, /retireActionWork/);
   assert.match(app, /selectedRefreshOperation\.retire/);
-  assert.match(app, /latest\.status === "judging"/);
+  assert.match(roundLifecycle, /latestRound\.status === "ready_to_guess" \|\| latestRound\.status === "judging"/);
+  assert.match(app, /observedGuessRoundIdRef/);
   assert.match(app, /request\.signal/);
   assert.match(events, /userId/);
   assert.match(events, /connectionGeneration/);
@@ -306,13 +364,18 @@ async function run() {
   assert.match(events, /POLL_TIMEOUT_MS/);
   assert.match(client, /DEFAULT_API_TIMEOUT_MS/);
   assert.match(client, /createAbortDeadline/);
+  assert.match(client, /timeoutMs \?\? DEFAULT_API_TIMEOUT_MS/);
+  assert.match(requestTimeouts, /SUBMIT_GUESS_TIMEOUT_MS = JUDGE_PROVIDER_TIMEOUT_MS \+ 10_000/);
   assert.match(gamesApi, /signal\?: AbortSignal/);
   assert.match(roundsApi, /signal\?: AbortSignal/);
   assert.match(roundsApi, /revealClue/);
+  assert.match(roundsApi, /timeoutMs: SUBMIT_GUESS_TIMEOUT_MS/);
   assert.doesNotMatch(roundsApi, /clue_count_used/);
   assert.match(guess, /round\.clue_reveal_count/);
   assert.match(guess, /revealClue/);
   assert.match(guess, /revealInFlight/);
+  assert.match(guess, /isGuessInteractionAllowed/);
+  assert.match(guess, /Scoring your guess/);
   assert.match(guess, /\[lifecycleEpoch, round\.id\]/);
   assert.match(gameTypes, /"judging"/);
   assert.match(statusPill, /status === "judging"/);

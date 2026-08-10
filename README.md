@@ -171,7 +171,7 @@ EXPO_PUBLIC_API_URL=http://localhost:8000 npm run web
 
 The local loopback default is intentionally limited to development execution. Preview/production build profiles and staging/production app environments fail closed if `EXPO_PUBLIC_API_URL` is missing, malformed, non-HTTP(S), loopback, or unspecified. Native runtime validation also rejects a loopback or missing URL whenever `__DEV__` is false, including a release built without environment labels. Configure the URL as a plaintext public EAS environment variable; it is not a secret.
 
-`EXPO_PUBLIC_API_TIMEOUT_MS` optionally sets the API deadline from 1,000 to 60,000 ms; invalid values use the 15,000 ms default.
+`EXPO_PUBLIC_API_TIMEOUT_MS` optionally sets the general API deadline from 1,000 to 60,000 ms; invalid values use the 15,000 ms default. Guess submission uses a 45,000 ms endpoint deadline so a valid judge request can finish within the backend's 35,000 ms provider bound. App backgrounding, navigation, and caller cancellation still abort immediately.
 
 ## Mobile validation
 
@@ -199,7 +199,7 @@ Public endpoints:
 - `POST /users`
 - `POST /invites/preview` (capability lookup, rate-limited)
 
-Private HTTP endpoints require `Authorization: Bearer <session token>`. The server derives the actor from that token and enforces profile ownership, game participation, and turn/role checks. Main private routes include profile/game reads, invite creation/join, round creation/read/retry, `POST /rounds/{round_id}/reveal-clue`, guess submission, event polling, WebSocket-ticket issuance, and device-token register/unregister. Clue reveals are persisted atomically for the authenticated guesser; scoring uses that server count and ignores the legacy client `clue_count_used` compatibility field. Guess submission atomically claims a round as `judging`, commits before calling an external judge, then finalizes only the matching claim. Duplicate submissions are rejected, failed judging restores a retryable `ready` round, and stale claims are recovered safely.
+Private HTTP endpoints require `Authorization: Bearer <session token>`. The server derives the actor from that token and enforces profile ownership, game participation, and turn/role checks. Main private routes include profile/game reads, invite creation/join, round creation/read/retry, `POST /rounds/{round_id}/reveal-clue`, guess submission, event polling, WebSocket-ticket issuance, and device-token register/unregister. Clue reveals are persisted atomically for the authenticated guesser; scoring uses that server count and ignores the legacy client `clue_count_used` compatibility field. Guess submission atomically claims a round as `judging`, commits before calling an external judge, then finalizes only the matching claim. The guesser remains on a read-only scoring screen during that state; either the HTTP response or a later event/poll refresh can open the result. Duplicate submissions are rejected, failed judging restores a retryable `ready` round, and stale claims are recovered safely.
 
 Realtime uses a short-lived, game-scoped, single-use ticket:
 

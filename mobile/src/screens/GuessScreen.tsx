@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Alert, ScrollView, Text, TextInput, View } from "react-native";
+import { ActivityIndicator, Alert, ScrollView, Text, TextInput, View } from "react-native";
 import { AlertTriangle, CheckCircle2, Eye } from "lucide-react-native";
 import { SvgXml } from "react-native-svg";
 import { revealClue, submitGuess } from "../api/rounds";
@@ -10,6 +10,7 @@ import type { GuessResult, Round } from "../types/game";
 import { captureMessage } from "../utils/errorReporter";
 import { warningHaptic } from "../utils/haptics";
 import { artifactProvider, isMockArtifact } from "../utils/providerProvenance";
+import { isGuessInteractionAllowed } from "../roundLifecycle";
 
 export function GuessScreen({
   round,
@@ -35,6 +36,8 @@ export function GuessScreen({
   const readySketches = useMemo(() => round.generated_svgs.filter((svg) => svg.status === "done" && svg.svg_text), [round]);
   const [visibleCount, setVisibleCount] = useState(() => clampPersistedClueCount(round.clue_reveal_count, readySketches.length));
   const visibleSketches = readySketches.slice(0, visibleCount);
+  const interactionAllowed = isGuessInteractionAllowed(round.status);
+  const judging = round.status === "judging";
 
   useEffect(() => {
     setVisibleCount(clampPersistedClueCount(round.clue_reveal_count, readySketches.length));
@@ -68,7 +71,7 @@ export function GuessScreen({
   }
 
   async function submit() {
-    if (submitInFlight.current || confirmationOpen.current) return;
+    if (!interactionAllowed || submitInFlight.current || confirmationOpen.current) return;
     if (guess.trim().length < 2) return;
     if (guess.trim().split(/\s+/).length < 3) {
       confirmationOpen.current = true;
@@ -82,7 +85,7 @@ export function GuessScreen({
   }
 
   async function submitConfirmed() {
-    if (submitInFlight.current) return;
+    if (!interactionAllowed || submitInFlight.current) return;
     submitInFlight.current = true;
     const controller = new AbortController();
     submitController.current = controller;
@@ -103,7 +106,7 @@ export function GuessScreen({
   }
 
   function revealNext() {
-    if (revealInFlight.current || loading) return;
+    if (!interactionAllowed || revealInFlight.current || loading) return;
     warningHaptic();
     Alert.alert("Reveal another clue?", "Each extra sketch reduces the final score by 8 points.", [
       { text: "Cancel", style: "cancel" },
@@ -112,7 +115,7 @@ export function GuessScreen({
   }
 
   async function persistReveal() {
-    if (revealInFlight.current || loading) return;
+    if (!interactionAllowed || revealInFlight.current || loading) return;
     revealInFlight.current = true;
     const controller = new AbortController();
     revealController.current = controller;
@@ -150,6 +153,13 @@ export function GuessScreen({
         </View>
       )}
       {!isMock && provider && <Text style={styles.tinyText}>Artifact provider: {provider}</Text>}
+      {judging && (
+        <View accessible accessibilityLabel="Scoring your guess" style={styles.panel}>
+          <ActivityIndicator color={colors.blue} />
+          <Text style={styles.gameTitle}>Scoring your guess</Text>
+          <Text style={styles.mutedText}>The judge is comparing your answer. You can leave this screen, and the result will still be saved.</Text>
+        </View>
+      )}
       <View style={styles.sketchGrid}>
         {visibleSketches.map((svg, index) => (
           <View key={svg.id} style={styles.sketchCard}>
@@ -173,7 +183,7 @@ export function GuessScreen({
           label="Show next clue"
           icon={<Eye size={18} color={colors.ink} />}
           onPress={revealNext}
-          disabled={loading}
+          disabled={!interactionAllowed || loading}
           loading={revealLoading}
         />
       )}
@@ -185,15 +195,15 @@ export function GuessScreen({
       )}
       <View style={styles.fieldGroup}>
         <Text style={styles.label}>Your guess</Text>
-        <TextInput accessibilityLabel="Your guess" editable={!loading} value={guess} onChangeText={setGuess} style={styles.input} placeholder="giraffe gives dolphin piano lesson" placeholderTextColor={colors.muted} />
+        <TextInput accessibilityLabel="Your guess" editable={interactionAllowed && !loading} value={guess} onChangeText={setGuess} style={styles.input} placeholder="giraffe gives dolphin piano lesson" placeholderTextColor={colors.muted} />
         <Text style={styles.mutedText}>{visibleCount > 1 ? "Extra clues reduce the score." : "First clue only keeps the full score."}</Text>
       </View>
       <PrimaryButton
-        label="Submit guess"
+        label={judging ? "Scoring guess" : "Submit guess"}
         icon={<CheckCircle2 size={20} color={colors.paper} />}
         onPress={submit}
-        disabled={guess.trim().length < 2 || revealLoading}
-        loading={loading}
+        disabled={!interactionAllowed || guess.trim().length < 2 || revealLoading}
+        loading={loading || judging}
       />
     </ScrollView>
   );

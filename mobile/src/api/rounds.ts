@@ -1,5 +1,6 @@
 import { apiFetch } from "./client";
 import type { GuessResult, Round } from "../types/game";
+import { SUBMIT_GUESS_TIMEOUT_MS } from "../requestTimeouts";
 
 export function createRound(gameId: string, prompt: string, signal?: AbortSignal): Promise<Round> {
   return apiFetch<Round>(`/games/${gameId}/rounds`, {
@@ -33,5 +34,6 @@ export function submitGuess(roundId: string, guessText: string, signal?: AbortSi
     method: "POST",
     body: JSON.stringify({ guess_text: guessText }),
     signal,
+    timeoutMs: SUBMIT_GUESS_TIMEOUT_MS,
   });
 }

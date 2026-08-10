@@ -14,7 +14,7 @@ This document separates measured local evidence from checks that still need cred
 Current working-tree checks executed on 2026-08-10:
 
 - Final guess-judging plus Task 8 backend regressions — **24 passed in 12.56s**. Coverage includes non-blocking external scoring, immediate duplicate rejection, unrelated SQLite write progress while the judge is stalled, same-process HTTP/WebSocket responsiveness, owned finalization, stable recoverable judge/finalization errors, stale-claim recovery, exact notification-provider selection, Docker migration-context inclusion, authoritative clue counts, and submit/reveal linearizability.
-- Full backend suite after the final release-review fixes — **131 passed in 49.01s**.
+- Full backend suite after the final integrated judging/mobile follow-up — **131 passed in 33.17s**.
 - Production-shaped migrated Uvicorn startup smoke — `/health` returned `status=ok` with `notification_provider=expo`, and unauthenticated `/debug/health/full` returned **404**; startup used `ENV=production`, `DEBUG=false`, `AUTO_CREATE_TABLES=false`, and no explicit notification-provider override.
 - Two disposable SQLite migration paths passed at head `20260810_0006`: clean `upgrade head` / `downgrade 20260810_0005` / `upgrade head`, and previous-revision `upgrade 20260810_0005` / `upgrade head` / `downgrade 20260810_0005` / `upgrade head`. Downgrade restores any in-flight `judging` round to `ready`, removes `guess_claim_id`, and reinstates the previous active-round index predicate.
 - Dockerfile source regression confirms the backend image includes `alembic.ini` and the full `alembic/` tree. An actual image build and one-shot in-container migration could not run because the local Docker daemon socket was unavailable; `docker version` failed to connect on the final retry.
@@ -22,6 +22,7 @@ Current working-tree checks executed on 2026-08-10:
 - Post-refresh `npm audit --omit=dev --json` reports **23 vulnerable package entries: 12 moderate and 11 high**, down from 27. The remaining advisory roots are `image-size`, `postcss`, and `uuid`; details and disposition are under Known non-blocking issues.
 - `npx expo install --check` — dependencies are up to date.
 - Task 3, Task 4, and Task 5 mobile checks, the expanded release URL/clue/judging/realtime-cursor lifecycle checks, and `npm run typecheck` passed with an explicit safe dummy staging HTTPS API URL. Realtime state is bounded, survives a background disable/enable for the same game/user identity, and resets on identity change.
+- The final judging-navigation regression simulates `ready_to_guess` → `judging_started` → lost HTTP response → `round.scored`: the active Guess screen stays mounted and read-only during judging, then event/poll refresh reaches Result despite the advanced turn. It also proves old completed-game reopen behavior, judging interaction lockout, a 45-second submit deadline above the 35-second judge bound, and independent caller/background abort.
 - Pinned Expo Doctor — **18/18 checks passed**.
 - Public Expo config, production web export, and a live exported HTML-shell check passed with dotenv disabled and `EXPO_PUBLIC_API_URL=https://api.example.invalid`.
 

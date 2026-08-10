@@ -41,25 +41,28 @@ export function isUnauthorizedError(error: unknown): error is ApiError {
   return error instanceof ApiError && error.status === 401;
 }
 
+export type ApiFetchOptions = RequestInit & { timeoutMs?: number };
+
 function telemetryUrl(path: string) {
   return path.startsWith("/invites/") ? `${API_URL}/invites/{code}` : `${API_URL}${path}`;
 }
 
 export async function apiFetch<T>(
   path: string,
-  options: RequestInit = {},
+  options: ApiFetchOptions = {},
   accessTokenOverride?: string | null,
 ): Promise<T> {
   const url = `${API_URL}${path}`;
-  const deadline = createAbortDeadline(options.signal ?? undefined, DEFAULT_API_TIMEOUT_MS);
+  const { timeoutMs, ...requestOptions } = options;
+  const deadline = createAbortDeadline(requestOptions.signal ?? undefined, timeoutMs ?? DEFAULT_API_TIMEOUT_MS);
   try {
-    const headers = new Headers(options.headers);
+    const headers = new Headers(requestOptions.headers);
     headers.set("Content-Type", "application/json");
     const accessToken = accessTokenOverride === undefined ? apiAccessToken : accessTokenOverride;
     if (accessToken) headers.set("Authorization", `Bearer ${accessToken}`);
     else headers.delete("Authorization");
     const response = await fetch(url, {
-      ...options,
+      ...requestOptions,
       headers,
       signal: deadline.signal,
     });
@@ -68,7 +71,7 @@ export async function apiFetch<T>(
     }
     return response.json();
   } catch (error) {
-    captureError(error, { area: "api", url: telemetryUrl(path), method: options.method ?? "GET" });
+    captureError(error, { area: "api", url: telemetryUrl(path), method: requestOptions.method ?? "GET" });
     if (deadline.didTimeout()) throw new ApiTimeoutError();
     if (error instanceof TypeError) {
       throw new Error(`Could not reach backend at ${API_URL}. Check the API URL and network.`);
