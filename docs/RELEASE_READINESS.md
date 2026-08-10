@@ -2,19 +2,18 @@
 
 - Evidence date: 2026-08-10
 - Candidate branch: `codex/beta-release-readiness`
-- Implementation SHA inspected before the final Task 8 evidence update: `ba4ac44`
-- Final candidate SHA: `<update after Task 8 final validation>`
-- Verified remote branch: `<update after push>`
-- Pull request: `<update with URL, or record unavailable>`
+- Validated implementation SHA: `2fe42f80fa55936852ef81c0e11e24e752c7ff63`
+- Verified remote branch: `https://github.com/P0RTNOY/AI-Pictionary-Game/tree/codex/beta-release-readiness`
+- Pull request: `https://github.com/P0RTNOY/AI-Pictionary-Game/pull/1`
 
-This document separates measured local evidence from checks that still need credentials, hosted services, or devices. Placeholders must be updated against one immutable final candidate; passing evidence must not be copied from a different commit after source changes.
+This document separates measured local evidence from checks that still need credentials, hosted services, or devices. Passing evidence is tied to the immutable implementation SHA above and must not be copied to a source-changing commit without rerunning it.
 
 ## Passed automatically
 
 Current working-tree checks executed on 2026-08-10:
 
 - Final guess-judging plus Task 8 backend regressions — **24 passed in 12.56s**. Coverage includes non-blocking external scoring, immediate duplicate rejection, unrelated SQLite write progress while the judge is stalled, same-process HTTP/WebSocket responsiveness, owned finalization, stable recoverable judge/finalization errors, stale-claim recovery, exact notification-provider selection, Docker migration-context inclusion, authoritative clue counts, and submit/reveal linearizability.
-- Full backend suite after the final integrated judging/mobile follow-up — **131 passed in 33.17s**.
+- Full backend suite after the final integrated judging/mobile follow-up — **131 passed in 40.71s** on the immutable implementation SHA.
 - Production-shaped migrated Uvicorn startup smoke — `/health` returned `status=ok` with `notification_provider=expo`, and unauthenticated `/debug/health/full` returned **404**; startup used `ENV=production`, `DEBUG=false`, `AUTO_CREATE_TABLES=false`, and no explicit notification-provider override.
 - Two disposable SQLite migration paths passed at head `20260810_0006`: clean `upgrade head` / `downgrade 20260810_0005` / `upgrade head`, and previous-revision `upgrade 20260810_0005` / `upgrade head` / `downgrade 20260810_0005` / `upgrade head`. Downgrade restores any in-flight `judging` round to `ready`, removes `guess_claim_id`, and reinstates the previous active-round index predicate.
 - Dockerfile source regression confirms the backend image includes `alembic.ini` and the full `alembic/` tree. An actual image build and one-shot in-container migration could not run because the local Docker daemon socket was unavailable; `docker version` failed to connect on the final retry.
@@ -25,6 +24,7 @@ Current working-tree checks executed on 2026-08-10:
 - The final judging-navigation regression simulates `ready_to_guess` → `judging_started` → lost HTTP response → `round.scored`: the active Guess screen stays mounted and read-only during judging, then event/poll refresh reaches Result despite the advanced turn. It also proves old completed-game reopen behavior, judging interaction lockout, a 45-second submit deadline above the 35-second judge bound, and independent caller/background abort.
 - Pinned Expo Doctor — **18/18 checks passed**.
 - Public Expo config, production web export, and a live exported HTML-shell check passed with dotenv disabled and `EXPO_PUBLIC_API_URL=https://api.example.invalid`.
+- Hosted GitHub Actions passed on the validated implementation SHA. Both push and pull-request runs completed the backend/migration job and the mobile static/lifecycle job successfully: [push run](https://github.com/P0RTNOY/AI-Pictionary-Game/actions/runs/31398256673) and [pull-request run](https://github.com/P0RTNOY/AI-Pictionary-Game/actions/runs/31398288955).
 
 Earlier Task 7 evidence:
 
@@ -40,7 +40,7 @@ Earlier Task 7 evidence:
 - `npm run typecheck` — passed.
 - `npm run doctor` (pinned `expo-doctor` 1.20.1) — **18/18 checks passed**.
 - Development `npx expo config --type public --json` with dotenv disabled and an explicit loopback development URL — passed; output was written outside the repository.
-- `.github/workflows/ci.yml` parsed as YAML and contains separate backend/mobile jobs. A hosted GitHub Actions run is not yet evidence and must be recorded after push.
+- `.github/workflows/ci.yml` parsed as YAML and contains separate backend/mobile jobs. Hosted evidence for the final implementation SHA is recorded above.
 
 Earlier exact-tree Task 6 evidence at commit `32186b8`:
 
@@ -100,20 +100,14 @@ No simulator gameplay pass is recorded. During the bounded Task 6 attempt, two u
 
 ## Release blockers
 
-- Immutable final candidate SHA, hosted CI result, remote branch verification, and PR field are not yet recorded.
 - The production backend image build plus in-container `alembic upgrade head` remains a release check until executed on a Docker-capable CI runner or deployment platform.
 - External beta distribution should wait for at least one complete physical iOS two-player pass. Android must either pass or be explicitly removed from scope.
 - If the candidate advertises real AI or push, the corresponding live OpenRouter and Expo push checks above are blockers until recorded.
 - A PostgreSQL-backed staging deployment is blocked until the migration chain and core lifecycle are executed against that target database.
 - Production universal/app links are blocked until their domain association and native handoff are configured and tested; use only the documented development custom scheme until then.
 
-## Final update checklist
+## Publication follow-up checklist
 
-At Task 8 completion:
-
-1. Replace the candidate/remote/PR placeholders.
-2. Rerun every automatic command against the final SHA and update counts only if measured.
-3. Link or identify the hosted CI run without copying secrets.
-4. Record dependency-audit disposition.
-5. Move completed external/device items into the passed sections with build/device/provider evidence.
-6. Leave any unmet item in **Release blockers** with an explicit scope decision.
+1. Reverify the remote branch head and pull-request checks after the documentation-only publication metadata commit.
+2. Move completed external/device items into the passed sections with build/device/provider evidence.
+3. Leave any unmet item in **Release blockers** with an explicit scope decision.
