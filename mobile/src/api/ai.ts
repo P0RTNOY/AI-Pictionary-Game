@@ -3,6 +3,7 @@ import { apiFetch } from "./client";
 export type AIStatus = {
   runtime_provider: string;
   openrouter_configured: boolean;
+  local_model_configured: boolean;
   mock_mode_notice?: string | null;
   artist_models: { tier: string; model: string; reasoning_effort?: string | null }[];
   judge_model: string;

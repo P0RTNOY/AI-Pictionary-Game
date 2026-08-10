@@ -1,5 +1,5 @@
 import * as Clipboard from "expo-clipboard";
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { Alert, ScrollView, Text, View } from "react-native";
 import { Bell, ClipboardCopy, RefreshCw, Trash2 } from "lucide-react-native";
 import { API_URL } from "../api/client";
@@ -47,6 +47,8 @@ export function DebugScreen({
   const [sending, setSending] = useState(false);
   const [localResetting, setLocalResetting] = useState(false);
   const [backendResetting, setBackendResetting] = useState(false);
+  const sendInFlight = useRef(false);
+  const resetDialogOpen = useRef(false);
 
   async function copy() {
     await Clipboard.setStringAsync(
@@ -77,6 +79,8 @@ export function DebugScreen({
   }
 
   async function sendPush() {
+    if (sendInFlight.current) return;
+    sendInFlight.current = true;
     setSending(true);
     try {
       const result = await sendTestNotification(user.id, selectedGameId);
@@ -89,16 +93,19 @@ export function DebugScreen({
     } catch (error) {
       Alert.alert("Could not send test notification", error instanceof Error ? error.message : "Unknown error");
     } finally {
+      sendInFlight.current = false;
       setSending(false);
     }
   }
 
   function handleResetLocal() {
+    if (resetDialogOpen.current || localResetting || backendResetting) return;
+    resetDialogOpen.current = true;
     Alert.alert(
       "Reset local app state?",
       "This clears this device’s local user/profile/onboarding state. You will return to first launch. Continue?",
       [
-        { text: "Cancel", style: "cancel" },
+        { text: "Cancel", style: "cancel", onPress: () => { resetDialogOpen.current = false; } },
         {
           text: "Reset",
           style: "destructive",
@@ -109,20 +116,24 @@ export function DebugScreen({
             } catch (error) {
               Alert.alert("Could not reset local state", error instanceof Error ? error.message : "Unknown error");
             } finally {
+              resetDialogOpen.current = false;
               setLocalResetting(false);
             }
           },
         },
       ],
+      { onDismiss: () => { resetDialogOpen.current = false; } },
     );
   }
 
   function handleResetBackend() {
+    if (resetDialogOpen.current || localResetting || backendResetting) return;
+    resetDialogOpen.current = true;
     Alert.alert(
       "Reset backend local data?",
       "This deletes all local users, games, rounds, invites, events, device tokens and notification attempts from the current backend database. Continue?",
       [
-        { text: "Cancel", style: "cancel" },
+        { text: "Cancel", style: "cancel", onPress: () => { resetDialogOpen.current = false; } },
         {
           text: "Reset",
           style: "destructive",
@@ -135,11 +146,13 @@ export function DebugScreen({
             } catch (error) {
               Alert.alert("Could not reset backend", error instanceof Error ? error.message : "Unknown error");
             } finally {
+              resetDialogOpen.current = false;
               setBackendResetting(false);
             }
           },
         },
       ],
+      { onDismiss: () => { resetDialogOpen.current = false; } },
     );
   }
 
@@ -157,10 +170,18 @@ export function DebugScreen({
         <DebugLine label="Environment" value={`${diagnostics.appEnv ?? "unknown"} / ${diagnostics.buildProfile ?? "unknown"}`} />
         <DebugLine label="API" value={API_URL} />
         <DebugLine label="Backend health" value={`${backendHealth.status}: ${backendHealth.message}`} />
-        <DebugLine label="AI provider" value={aiStatus ? `${aiStatus.runtime_provider} / judge ${aiStatus.judge_model}` : "Unknown"} />
+        <DebugLine label="AI provider" value={aiStatus ? aiStatus.runtime_provider : "Unknown"} />
+        <DebugLine label="Judge model" value={aiStatus ? aiStatus.judge_model : "Unknown"} />
+        <DebugLine
+          label="Configured"
+          value={aiStatus ? `OpenRouter: ${aiStatus.openrouter_configured ? "Yes" : "No"}, Local: ${aiStatus.local_model_configured ? "Yes" : "No"}` : "Unknown"}
+        />
+        {aiStatus?.artist_models && (
+          <DebugLine label="Artist models" value={aiStatus.artist_models.map((model) => `${model.tier}: ${model.model}`).join("\n")} />
+        )}
         {aiStatus?.mock_mode_notice && <DebugLine label="Mock mode" value={aiStatus.mock_mode_notice} />}
         <DebugLine label="User" value={`${user.display_name} (${user.id.slice(0, 8)})`} />
-        
+
         <View style={{ marginVertical: 8, borderTopWidth: 1, borderTopColor: colors.line }} />
         <DebugLine label="Active Game ID" value={selectedGameId ?? "None"} />
         {selectedRound && (
@@ -170,7 +191,8 @@ export function DebugScreen({
             {selectedRound.original_prompt ? (
               <DebugLine label="Original Prompt" value={selectedRound.original_prompt} />
             ) : null}
-            <DebugLine label="SVG Tiers" value={selectedRound.generated_svgs.map(s => s.model_tier).join(", ") || "None"} />
+            <DebugLine label="Round Provider" value={selectedRound.generated_svgs[0]?.provider_used ?? "Unknown"} />
+            <DebugLine label="SVG Tiers" value={selectedRound.generated_svgs.map((svg) => svg.model_tier).join(", ") || "None"} />
           </>
         )}
         <View style={{ marginVertical: 8, borderTopWidth: 1, borderTopColor: colors.line }} />

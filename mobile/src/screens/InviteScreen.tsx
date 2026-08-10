@@ -1,5 +1,5 @@
 import * as Clipboard from "expo-clipboard";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Alert, AppState, ScrollView, Share, Text, TextInput, View } from "react-native";
 import { ClipboardCopy, LogIn, Plus, RefreshCw, Share2 } from "lucide-react-native";
 import { createInvite, getInvite, joinInvite } from "../api/invites";
@@ -23,34 +23,56 @@ export function InviteScreen({
   const [invite, setInvite] = useState<GameInvitePreview | null>(null);
   const [joinInviteStatus, setJoinInviteStatus] = useState<GameInvitePreview | null>(null);
   const [joinCode, setJoinCode] = useState(initialCode ?? "");
-  const [loading, setLoading] = useState(false);
+  const [busyAction, setBusyAction] = useState<"create" | "join" | "share" | null>(null);
+  const [refreshingInvite, setRefreshingInvite] = useState(false);
+  const [checkingInvite, setCheckingInvite] = useState(false);
+  const actionInFlight = useRef(false);
+  const actionController = useRef<AbortController | null>(null);
+  const lookupController = useRef<AbortController | null>(null);
+  const refreshController = useRef<AbortController | null>(null);
+  const lookupGeneration = useRef(0);
+
+  useEffect(() => () => {
+    actionController.current?.abort();
+    lookupController.current?.abort();
+    refreshController.current?.abort();
+  }, []);
 
   useEffect(() => {
     if (!initialCode) return;
     const normalized = normalizeInviteCode(initialCode);
     setJoinCode(normalized);
-    lookupJoinInvite(normalized, true);
+    void lookupJoinInvite(normalized, true);
     onInitialCodeHandled?.();
   }, [initialCode]);
 
   useEffect(() => {
     const subscription = AppState.addEventListener("change", (state) => {
       if (state !== "active") return;
-      if (invite) refreshCreatedInvite(true);
-      if (joinCode.trim()) lookupJoinInvite(joinCode, true);
+      if (invite) void refreshCreatedInvite(true);
+      if (joinCode.trim()) void lookupJoinInvite(joinCode, true);
     });
     return () => subscription.remove();
   }, [invite?.code, joinCode]);
 
   async function create() {
-    setLoading(true);
+    if (actionInFlight.current) return;
+    actionInFlight.current = true;
+    const controller = new AbortController();
+    actionController.current = controller;
+    setBusyAction("create");
     try {
-      setInvite(await createInvite());
+      const created = await createInvite(controller.signal);
+      if (!controller.signal.aborted) setInvite(created);
     } catch (error) {
-      captureError(error, { area: "invite_create", userId });
-      Alert.alert("Could not create invite", error instanceof Error ? error.message : "Unknown error");
+      if (!controller.signal.aborted) {
+        captureError(error, { area: "invite_create", userId });
+        Alert.alert("Could not create invite", error instanceof Error ? error.message : "Unknown error");
+      }
     } finally {
-      setLoading(false);
+      if (!controller.signal.aborted) setBusyAction(null);
+      actionInFlight.current = false;
+      if (actionController.current === controller) actionController.current = null;
     }
   }
 
@@ -67,50 +89,85 @@ export function InviteScreen({
   }
 
   async function shareInvite() {
-    if (!invite) return;
-    await Share.share({
-      message: `Join my AI Pictionary game: ${buildInviteLink(invite.code)}\nCode: ${invite.code}`,
-    });
-    refreshCreatedInvite(true);
+    if (!invite || actionInFlight.current) return;
+    actionInFlight.current = true;
+    setBusyAction("share");
+    try {
+      await Share.share({
+        message: `Join my AI Pictionary game: ${buildInviteLink(invite.code)}\nCode: ${invite.code}`,
+      });
+      void refreshCreatedInvite(true);
+    } finally {
+      actionInFlight.current = false;
+      setBusyAction(null);
+    }
   }
 
   async function refreshCreatedInvite(silent = false) {
     if (!invite) return;
+    refreshController.current?.abort();
+    const controller = new AbortController();
+    refreshController.current = controller;
+    setRefreshingInvite(true);
     try {
-      setInvite(await getInvite(invite.code));
+      const refreshed = await getInvite(invite.code, controller.signal);
+      if (!controller.signal.aborted) setInvite(refreshed);
     } catch (error) {
-      captureError(error, { area: "invite_refresh" });
-      if (!silent) Alert.alert("Could not refresh invite", error instanceof Error ? error.message : "Unknown error");
+      if (!controller.signal.aborted) {
+        captureError(error, { area: "invite_refresh" });
+        if (!silent) Alert.alert("Could not refresh invite", error instanceof Error ? error.message : "Unknown error");
+      }
+    } finally {
+      if (!controller.signal.aborted) setRefreshingInvite(false);
+      if (refreshController.current === controller) refreshController.current = null;
     }
   }
 
   async function lookupJoinInvite(codeValue = joinCode, silent = false) {
     const normalized = normalizeInviteCode(codeValue);
     if (!normalized) return;
+    const generation = ++lookupGeneration.current;
+    lookupController.current?.abort();
+    const controller = new AbortController();
+    lookupController.current = controller;
+    setCheckingInvite(true);
     try {
-      const found = await getInvite(normalized);
-      setJoinInviteStatus(found);
+      const found = await getInvite(normalized, controller.signal);
+      if (!controller.signal.aborted && generation === lookupGeneration.current) setJoinInviteStatus(found);
     } catch (error) {
-      captureError(error, { area: "invite_lookup" });
-      setJoinInviteStatus(null);
-      if (!silent) Alert.alert("Invite not found", friendlyInviteError(error));
+      if (!controller.signal.aborted && generation === lookupGeneration.current) {
+        captureError(error, { area: "invite_lookup" });
+        setJoinInviteStatus(null);
+        if (!silent) Alert.alert("Invite not found", friendlyInviteError(error));
+      }
+    } finally {
+      if (!controller.signal.aborted && generation === lookupGeneration.current) setCheckingInvite(false);
+      if (lookupController.current === controller) lookupController.current = null;
     }
   }
 
   async function join() {
-    if (!joinCode.trim()) return;
-    setLoading(true);
+    if (!joinCode.trim() || actionInFlight.current) return;
+    actionInFlight.current = true;
+    const controller = new AbortController();
+    actionController.current = controller;
+    setBusyAction("join");
     const code = normalizeInviteCode(joinCode);
     captureMessage("Invite code submitted", { area: "invite_join", userId });
     try {
-      const game = await joinInvite(code);
+      const game = await joinInvite(code, controller.signal);
+      if (controller.signal.aborted) return;
       captureMessage("Invite join returned game", { area: "invite_join", gameId: game.id, currentTurnUserId: game.current_turn_user_id });
       onJoined(game);
     } catch (error) {
-      captureError(error, { area: "invite_join", userId });
-      Alert.alert("Could not join invite", friendlyInviteError(error));
+      if (!controller.signal.aborted) {
+        captureError(error, { area: "invite_join", userId });
+        Alert.alert("Could not join invite", friendlyInviteError(error));
+      }
     } finally {
-      setLoading(false);
+      if (!controller.signal.aborted) setBusyAction(null);
+      actionInFlight.current = false;
+      if (actionController.current === controller) actionController.current = null;
     }
   }
 
@@ -118,7 +175,7 @@ export function InviteScreen({
   const joinStatus = statusText(joinInviteStatus, userId, "join");
   const cannotJoin =
     !joinCode.trim() ||
-    loading ||
+    busyAction !== null ||
     joinInviteStatus?.status === "accepted" ||
     joinInviteStatus?.status === "expired" ||
     joinInviteStatus?.creator_user_id === userId;
@@ -138,19 +195,19 @@ export function InviteScreen({
         {invite && <Text style={styles.tinyText}>Link format: {buildInviteLink(invite.code)}</Text>}
         <View style={styles.row}>
           <View style={styles.rowFill}>
-            <PrimaryButton label="Create code" icon={<Plus size={20} color={colors.paper} />} onPress={create} loading={loading} />
+            <PrimaryButton label="Create invite code" icon={<Plus size={20} color={colors.paper} />} onPress={create} loading={busyAction === "create"} disabled={busyAction !== null} />
           </View>
-          {invite && <SecondaryButton label="Share" icon={<Share2 size={18} color={colors.ink} />} onPress={shareInvite} />}
+          {invite && <SecondaryButton label="Share invite" icon={<Share2 size={18} color={colors.ink} />} onPress={shareInvite} loading={busyAction === "share"} disabled={busyAction !== null} />}
         </View>
         {invite && (
           <View style={styles.row}>
-            <SecondaryButton label="Copy code" icon={<ClipboardCopy size={18} color={colors.ink} />} onPress={copy} />
-            <SecondaryButton label="Refresh" icon={<RefreshCw size={18} color={colors.ink} />} onPress={() => refreshCreatedInvite()} />
+            <SecondaryButton label="Copy invite code" icon={<ClipboardCopy size={18} color={colors.ink} />} onPress={copy} disabled={busyAction !== null || refreshingInvite} />
+            <SecondaryButton label="Refresh invite status" icon={<RefreshCw size={18} color={colors.ink} />} onPress={() => refreshCreatedInvite()} loading={refreshingInvite} disabled={busyAction !== null} />
           </View>
         )}
         {invite && (
           <View style={styles.row}>
-            <SecondaryButton label="Copy link" icon={<ClipboardCopy size={18} color={colors.ink} />} onPress={copyLink} />
+            <SecondaryButton label="Copy invite link" icon={<ClipboardCopy size={18} color={colors.ink} />} onPress={copyLink} disabled={busyAction !== null || refreshingInvite} />
           </View>
         )}
       </View>
@@ -158,6 +215,8 @@ export function InviteScreen({
         <Text style={styles.gameTitle}>Join with code</Text>
         <TextInput
           value={joinCode}
+          accessibilityLabel="Invite code"
+          editable={busyAction === null}
           onChangeText={(value) => {
             setJoinCode(normalizeInviteCode(value));
             setJoinInviteStatus(null);
@@ -169,12 +228,12 @@ export function InviteScreen({
           placeholder="Paste invite code"
           placeholderTextColor={colors.muted}
         />
-        {joinCode.trim() && <Text style={styles.tinyText}>Status: {joinStatus}</Text>}
+        {joinCode.trim() && <Text style={styles.tinyText}>Status: {checkingInvite ? "Checking…" : joinStatus}</Text>}
         <View style={styles.row}>
           <View style={styles.rowFill}>
-            <PrimaryButton label="Join game" icon={<LogIn size={20} color={colors.paper} />} onPress={join} loading={loading} disabled={cannotJoin} />
+            <PrimaryButton label="Join game from invite" icon={<LogIn size={20} color={colors.paper} />} onPress={join} loading={busyAction === "join"} disabled={cannotJoin} />
           </View>
-          <SecondaryButton label="Check" icon={<RefreshCw size={18} color={colors.ink} />} onPress={() => lookupJoinInvite()} />
+          <SecondaryButton label="Check invite status" icon={<RefreshCw size={18} color={colors.ink} />} onPress={() => lookupJoinInvite()} loading={checkingInvite} disabled={busyAction !== null} />
         </View>
       </View>
     </ScrollView>

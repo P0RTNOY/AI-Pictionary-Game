@@ -1,9 +1,9 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { StatusBar } from "expo-status-bar";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Alert, AppState, KeyboardAvoidingView, Linking, Platform, SafeAreaView } from "react-native";
+import { Alert, AppState, type AppStateStatus, KeyboardAvoidingView, Linking, Platform, SafeAreaView } from "react-native";
 
-import { configureApiCredential, healthCheck, isUnauthorizedError } from "./src/api/client";
+import { ApiError, configureApiCredential, healthCheck, isUnauthorizedError } from "./src/api/client";
 import { getAIStatus, type AIStatus } from "./src/api/ai";
 import { getGame, getGameStats, listGames } from "./src/api/games";
 import { createUser, getUser, updateUser } from "./src/api/users";
@@ -23,10 +23,11 @@ import { WaitingScreen } from "./src/screens/WaitingScreen";
 import { styles } from "./src/styles";
 import type { Game, GameStats, GuessResult, Round, User } from "./src/types/game";
 import { appDiagnostics } from "./src/config";
-import { parseInviteCodeFromUrl } from "./src/utils/deepLinks";
+import { parseAppLink } from "./src/utils/deepLinks";
 import { captureError, captureMessage } from "./src/utils/errorReporter";
 import { decideSessionBootstrap, restoredSessionDestination } from "./src/sessionBootstrap";
 import { createSessionEpoch } from "./src/sessionEpoch";
+import { createRequestScope } from "./src/requestScope";
 
 type Screen = "onboarding" | "home" | "profile_setup" | "edit_profile" | "invites" | "create_round" | "waiting" | "guess" | "result" | "debug" | "startup_error";
 
@@ -42,6 +43,7 @@ export default function App() {
   const [selectedRound, setSelectedRound] = useState<Round | null>(null);
   const [selectedStats, setSelectedStats] = useState<GameStats | null>(null);
   const [pendingInviteCode, setPendingInviteCode] = useState<string | null>(null);
+  const [pendingGameId, setPendingGameId] = useState<string | null>(null);
   const [backendHealth, setBackendHealth] = useState<{ status: "unknown" | "ok" | "unreachable"; message: string }>({
     status: "unknown",
     message: "Not checked yet",
@@ -54,13 +56,34 @@ export default function App() {
   const [startupLoading, setStartupLoading] = useState(false);
   const [sessionRetiring, setSessionRetiring] = useState(false);
   const [sessionAccessToken, setSessionAccessToken] = useState<string | null>(null);
+  const [appState, setAppState] = useState<AppStateStatus>(AppState.currentState);
+  const [openingGameId, setOpeningGameId] = useState<string | null>(null);
   const lastHandledUrl = useRef<string | null>(null);
   const sessionEpoch = useRef(createSessionEpoch()).current;
+  const identityRequests = useRef(createRequestScope()).current;
+  const gameRequests = useRef(createRequestScope()).current;
+  const userRef = useRef<User | null>(null);
+  const selectedGameRef = useRef<Game | null>(null);
+  const screenRef = useRef<Screen>(screen);
+  const openingGameRef = useRef<string | null>(null);
+  const mountedRef = useRef(true);
+  const gamesRefreshGeneration = useRef(0);
+  const selectedRefreshGeneration = useRef(0);
+  const statsRefreshGeneration = useRef(0);
+  userRef.current = user;
+  selectedGameRef.current = selectedGame;
+  screenRef.current = screen;
+  const appIsActive = appState === "active";
 
   useEffect(() => {
     ensureLocalUser();
     refreshBackendHealth();
     refreshAIStatus();
+    return () => {
+      mountedRef.current = false;
+      identityRequests.retire();
+      gameRequests.retire();
+    };
   }, []);
 
   useEffect(() => {
@@ -71,69 +94,104 @@ export default function App() {
       });
     const subscription = Linking.addEventListener("url", ({ url }) => handleIncomingUrl(url));
     return () => subscription.remove();
-  }, [user?.id]);
+  }, []);
 
   useEffect(() => {
-    if (!user) return;
+    if (!user || !appIsActive) {
+      identityRequests.retire();
+      return;
+    }
+    identityRequests.activate(user.id);
     refreshGames(user.id);
-  }, [user?.id]);
+  }, [user?.id, appIsActive]);
+
+  useEffect(() => {
+    if (!selectedGame || !user || !appIsActive) {
+      gameRequests.retire();
+      return;
+    }
+    gameRequests.activate(gameScopeKey(user.id, selectedGame.id));
+  }, [selectedGame?.id, user?.id, appIsActive]);
 
   useEffect(() => {
     if (user && pendingInviteCode) setScreen("invites");
   }, [user?.id, pendingInviteCode]);
 
   useEffect(() => {
-    if (!selectedGame || sessionRetiring) return;
-    const interval = setInterval(async () => {
-      const capturedEpoch = sessionEpoch.capture();
-      try {
-        if (!user) return;
-        const latest = await getGame(selectedGame.id);
-        sessionEpoch.runIfCurrent(capturedEpoch, () => {
-          setSelectedGame(latest);
-          setSelectedRound(latest.latest_round);
-          routeForGame(latest, false);
-        });
-      } catch {
-        // Keep the current UI if the network blips.
-      }
-    }, 5000);
-    return () => clearInterval(interval);
-  }, [selectedGame?.id, user?.id, screen, sessionRetiring]);
+    if (!user || !pendingGameId || !appIsActive) return;
+    const gameId = pendingGameId;
+    setPendingGameId(null);
+    void openGameById(gameId);
+  }, [user?.id, pendingGameId, appIsActive]);
 
   useEffect(() => {
     const subscription = AppState.addEventListener("change", (state) => {
+      setAppState(state);
       if (state === "active") {
         refreshBackendHealth();
         refreshAIStatus();
-        if (user) refreshGames(user.id);
-        if (selectedGame && user) refreshSelectedGame(selectedGame.id, user.id);
+        const activeUser = userRef.current;
+        const activeGame = selectedGameRef.current;
+        if (!activeUser) {
+          void ensureLocalUser();
+        }
+        if (activeGame && activeUser) {
+          gameRequests.activate(gameScopeKey(activeUser.id, activeGame.id));
+          refreshSelectedGame(activeGame.id, activeUser.id);
+        }
+      } else {
+        identityRequests.retire();
+        gameRequests.retire();
+        openingGameRef.current = null;
+        setOpeningGameId(null);
       }
     });
     return () => subscription.remove();
-  }, [user?.id, selectedGame?.id]);
+  }, []);
 
-  const handleGameEvents = useCallback(() => {
-    if (selectedGame && user) refreshSelectedGame(selectedGame.id, user.id);
-  }, [selectedGame?.id, user?.id]);
+  const handleGameEvents = useCallback((events: { game_id: string }[]) => {
+    const activeGame = selectedGameRef.current;
+    const activeUser = userRef.current;
+    if (!activeGame || !activeUser || events.some((event) => event.game_id !== activeGame.id)) return;
+    void refreshSelectedGame(activeGame.id, activeUser.id);
+  }, []);
 
   const openGameById = useCallback(
     async (gameId: string) => {
-      if (!user) return;
+      const activeUser = userRef.current;
+      if (!activeUser) return;
+      if (AppState.currentState !== "active") {
+        setPendingGameId(gameId);
+        return;
+      }
+      if (openingGameRef.current) return;
+      openingGameRef.current = gameId;
+      setOpeningGameId(gameId);
       const capturedEpoch = sessionEpoch.capture();
+      identityRequests.activate(activeUser.id);
+      const request = identityRequests.begin(activeUser.id);
       try {
-        const game = await getGame(gameId);
-        sessionEpoch.runIfCurrent(capturedEpoch, () => openGame(game));
+        const game = await getGame(gameId, request.signal);
+        if (request.isCurrent()) sessionEpoch.runIfCurrent(capturedEpoch, () => openGame(game));
       } catch (error) {
-        sessionEpoch.runIfCurrent(capturedEpoch, () => Alert.alert("Could not open game", getErrorMessage(error)));
+        if (request.isCurrent()) {
+          sessionEpoch.runIfCurrent(capturedEpoch, () => Alert.alert("Could not open game", friendlyGameLinkError(error)));
+        }
+      } finally {
+        request.finish();
+        if (openingGameRef.current === gameId) {
+          openingGameRef.current = null;
+          if (mountedRef.current) setOpeningGameId(null);
+        }
       }
     },
-    [user?.id],
+    [],
   );
 
   const realtimeStatus = useGameEvents({
     gameId: selectedGame?.id ?? null,
-    enabled: Boolean(selectedGame && user && !sessionRetiring),
+    userId: user?.id ?? null,
+    enabled: Boolean(selectedGame && user && !sessionRetiring && appIsActive),
     onEvents: handleGameEvents,
   });
   const pushStatus = usePushNotifications(user?.id ?? null, sessionAccessToken, openGameById, !sessionRetiring);
@@ -172,16 +230,19 @@ export default function App() {
     }
 
     configureApiCredential(storedToken);
+    identityRequests.activate(storedId!);
+    const request = identityRequests.begin(storedId!);
     try {
-      const existing = await getUser(storedId!);
-      if (!sessionEpoch.isCurrent(capturedEpoch)) return;
+      const existing = await getUser(storedId!, request.signal);
+      if (!sessionEpoch.isCurrent(capturedEpoch) || !request.isCurrent()) return;
       sessionEpoch.activate();
+      identityRequests.activate(existing.id);
       setSessionAccessToken(storedToken);
       setUser(existing);
       setStartupError(null);
       setScreen(restoredSessionDestination(Boolean(pendingInviteCode)));
     } catch (error) {
-      if (!sessionEpoch.isCurrent(capturedEpoch)) return;
+      if (!sessionEpoch.isCurrent(capturedEpoch) || !request.isCurrent()) return;
       const failure = isUnauthorizedError(error) ? "unauthorized" : "transient";
       if (decideSessionBootstrap(true, true, failure) === "reonboard") {
         await clearStoredSession();
@@ -191,6 +252,8 @@ export default function App() {
       }
       setStartupError(getErrorMessage(error));
       setScreen("startup_error");
+    } finally {
+      request.finish();
     }
     setStartupLoading(false);
   }
@@ -225,78 +288,116 @@ export default function App() {
   function handleIncomingUrl(url: string | null) {
     if (!url || lastHandledUrl.current === url) return;
     lastHandledUrl.current = url;
-    const inviteCode = parseInviteCodeFromUrl(url);
-    if (!inviteCode) return;
-    captureMessage("Invite deep link received", { area: "deep_link" });
-    setPendingInviteCode(inviteCode);
-    if (user) {
-      setSelectedGame(null);
-      setSelectedRound(null);
-      setScreen("invites");
+    const link = parseAppLink(url);
+    if (!link) return;
+    captureMessage("App deep link received", { area: "deep_link", kind: link.kind });
+    if (link.kind === "invite") {
+      setPendingGameId(null);
+      setPendingInviteCode(link.code);
+      if (userRef.current) {
+        gameRequests.retire();
+        selectedGameRef.current = null;
+        setSelectedGame(null);
+        setSelectedRound(null);
+        setScreen("invites");
+      }
+    } else {
+      setPendingInviteCode(null);
+      setPendingGameId(link.gameId);
+      if (userRef.current) {
+        gameRequests.retire();
+      }
     }
   }
 
   async function refreshGames(userId: string) {
+    if (AppState.currentState !== "active") return;
     const capturedEpoch = sessionEpoch.capture();
+    const generation = ++gamesRefreshGeneration.current;
+    identityRequests.activate(userId);
+    const request = identityRequests.begin(userId);
     setRefreshing(true);
     try {
-      const refreshedGames = await listGames(userId);
-      sessionEpoch.runIfCurrent(capturedEpoch, () => setGames(refreshedGames));
+      const refreshedGames = await listGames(userId, request.signal);
+      if (request.isCurrent() && generation === gamesRefreshGeneration.current) sessionEpoch.runIfCurrent(capturedEpoch, () => setGames(refreshedGames));
     } catch (error) {
-      sessionEpoch.runIfCurrent(capturedEpoch, () => {
+      if (request.isCurrent() && generation === gamesRefreshGeneration.current) sessionEpoch.runIfCurrent(capturedEpoch, () => {
         captureError(error, { area: "games_refresh", userId });
         Alert.alert("Could not load games", getErrorMessage(error));
       });
     } finally {
-      sessionEpoch.runIfCurrent(capturedEpoch, () => setRefreshing(false));
+      if (generation === gamesRefreshGeneration.current) {
+        request.runIfCurrent(() => sessionEpoch.runIfCurrent(capturedEpoch, () => setRefreshing(false)));
+      }
+      request.finish();
     }
   }
 
   async function refreshSelectedGame(gameId: string, userId: string) {
+    if (AppState.currentState !== "active") return;
     const capturedEpoch = sessionEpoch.capture();
+    const generation = ++selectedRefreshGeneration.current;
+    const key = gameScopeKey(userId, gameId);
+    gameRequests.activate(key);
+    const request = gameRequests.begin(key);
     setSelectedGameLoading(true);
     setSelectedGameError(null);
     try {
-      const latest = await getGame(gameId);
-      if (!sessionEpoch.isCurrent(capturedEpoch)) return;
+      const latest = await getGame(gameId, request.signal);
+      if (!sessionEpoch.isCurrent(capturedEpoch) || !request.isCurrent() || generation !== selectedRefreshGeneration.current) return;
       setSelectedGame(latest);
       setSelectedRound(latest.latest_round);
-      refreshStats(gameId, userId);
+      void refreshStats(gameId, userId);
       routeForGame(latest, false);
-      captureMessage("Selected game refreshed", { area: "navigation", gameId, target: screen });
+      captureMessage("Selected game refreshed", { area: "navigation", gameId, target: screenRef.current });
     } catch (error) {
-      if (!sessionEpoch.isCurrent(capturedEpoch)) return;
+      if (!sessionEpoch.isCurrent(capturedEpoch) || !request.isCurrent() || generation !== selectedRefreshGeneration.current) return;
       captureError(error, { area: "selected_game_refresh", gameId, userId });
       setSelectedGameError(getErrorMessage(error));
       setScreen("waiting");
     } finally {
-      sessionEpoch.runIfCurrent(capturedEpoch, () => setSelectedGameLoading(false));
+      if (generation === selectedRefreshGeneration.current) {
+        request.runIfCurrent(() => sessionEpoch.runIfCurrent(capturedEpoch, () => setSelectedGameLoading(false)));
+      }
+      request.finish();
     }
   }
 
   async function refreshStats(gameId: string, userId: string) {
+    if (AppState.currentState !== "active") return;
     const capturedEpoch = sessionEpoch.capture();
+    const generation = ++statsRefreshGeneration.current;
+    const request = gameRequests.begin(gameScopeKey(userId, gameId));
     try {
-      const stats = await getGameStats(gameId);
-      sessionEpoch.runIfCurrent(capturedEpoch, () => setSelectedStats(stats));
+      const stats = await getGameStats(gameId, request.signal);
+      if (generation === statsRefreshGeneration.current) request.runIfCurrent(() => sessionEpoch.runIfCurrent(capturedEpoch, () => setSelectedStats(stats)));
     } catch {
-      sessionEpoch.runIfCurrent(capturedEpoch, () => setSelectedStats(null));
+      if (generation === statsRefreshGeneration.current) request.runIfCurrent(() => sessionEpoch.runIfCurrent(capturedEpoch, () => setSelectedStats(null)));
+    } finally {
+      request.finish();
     }
   }
 
   function openGame(game: Game) {
+    const activeUser = userRef.current;
+    if (!activeUser) return;
+    gameRequests.activate(gameScopeKey(activeUser.id, game.id));
+    selectedGameRef.current = game;
     setSelectedGame(game);
     setSelectedRound(game.latest_round);
-    if (user) refreshStats(game.id, user.id);
+    setSelectedStats(null);
+    setSelectedGameError(null);
+    void refreshStats(game.id, activeUser.id);
     routeForGame(game, true);
   }
 
   function routeForGame(game: Game, force: boolean) {
-    if (!user) return;
+    const activeUser = userRef.current;
+    if (!activeUser) return;
     const latest = game.latest_round;
     if (!latest || latest.status === "guessed") {
-      if (game.current_turn_user_id === user.id) setScreen("create_round");
-      else setScreen(force ? "waiting" : screen);
+      if (game.current_turn_user_id === activeUser.id) setScreen("create_round");
+      else setScreen(force ? "waiting" : screenRef.current);
       return;
     }
     if (latest.status === "failed") {
@@ -308,7 +409,7 @@ export default function App() {
       return;
     }
     if (latest.status === "ready_to_guess") {
-      setScreen(latest.guesser_user_id === user.id ? "guess" : "waiting");
+      setScreen(latest.guesser_user_id === activeUser.id ? "guess" : "waiting");
     }
   }
 
@@ -322,6 +423,10 @@ export default function App() {
 
   async function retireSessionAndResetClient(unregisterPush: boolean) {
     sessionEpoch.retire();
+    identityRequests.retire();
+    gameRequests.retire();
+    userRef.current = null;
+    selectedGameRef.current = null;
     setSessionRetiring(true);
     let resetError: unknown = null;
     try {
@@ -343,16 +448,20 @@ export default function App() {
       configureApiCredential(null);
       setSessionAccessToken(null);
       setUser(null);
+      selectedGameRef.current = null;
       setSelectedGame(null);
       setSelectedRound(null);
       setSelectedStats(null);
       setGames([]);
       setPendingInviteCode(null);
+      setPendingGameId(null);
       setSelectedGameError(null);
       setSelectedGameLoading(false);
       setRefreshing(false);
       setStartupLoading(false);
       setStartupError(null);
+      openingGameRef.current = null;
+      setOpeningGameId(null);
       lastHandledUrl.current = null;
       setScreen("onboarding");
       setSessionRetiring(false);
@@ -364,6 +473,8 @@ export default function App() {
     const capturedEpoch = sessionEpoch.capture();
     setPendingInviteCode(null);
     if (!user) return;
+    identityRequests.activate(user.id);
+    const request = identityRequests.begin(user.id);
     captureMessage("Invite join response", {
       area: "invite_join",
       gameId: game.id,
@@ -373,13 +484,11 @@ export default function App() {
     setSelectedGameLoading(true);
     setSelectedGameError(null);
     try {
-      const [joinedGame, refreshedGames] = await Promise.all([getGame(game.id), listGames(user.id)]);
-      if (!sessionEpoch.isCurrent(capturedEpoch)) return;
+      const [joinedGame, refreshedGames] = await Promise.all([getGame(game.id, request.signal), listGames(user.id, request.signal)]);
+      if (!sessionEpoch.isCurrent(capturedEpoch) || !request.isCurrent()) return;
       captureMessage("Games refreshed after invite join", { area: "invite_join", gameId: game.id, count: refreshedGames.length });
       setGames(refreshedGames);
-      setSelectedGame(joinedGame);
-      setSelectedRound(joinedGame.latest_round);
-      routeForGame(joinedGame, true);
+      openGame(joinedGame);
       captureMessage("Navigation after invite join", {
         area: "invite_join",
         gameId: joinedGame.id,
@@ -387,15 +496,15 @@ export default function App() {
         currentTurnUserId: joinedGame.current_turn_user_id,
       });
     } catch (error) {
-      if (!sessionEpoch.isCurrent(capturedEpoch)) return;
+      if (!sessionEpoch.isCurrent(capturedEpoch) || !request.isCurrent()) return;
       captureError(error, { area: "invite_join_fetch_game", gameId: game.id, userId: user.id });
-      setSelectedGame(game);
-      setSelectedRound(game.latest_round);
+      openGame(game);
       setSelectedGameError(getErrorMessage(error));
       setScreen("waiting");
       refreshGames(user.id);
     } finally {
-      sessionEpoch.runIfCurrent(capturedEpoch, () => setSelectedGameLoading(false));
+      request.runIfCurrent(() => sessionEpoch.runIfCurrent(capturedEpoch, () => setSelectedGameLoading(false)));
+      request.finish();
     }
   }
 
@@ -422,6 +531,8 @@ export default function App() {
 
   function goHome() {
     if (user) refreshGames(user.id);
+    gameRequests.retire();
+    selectedGameRef.current = null;
     setSelectedGame(null);
     setSelectedRound(null);
     setSelectedStats(null);
@@ -451,14 +562,16 @@ export default function App() {
         {screen === "profile_setup" && (
           <ProfileScreen
             user={null}
-            onSave={async (payload) => {
-              const session = await createUser(payload.display_name, payload.avatar_emoji, payload.avatar_color);
+            onSave={async (payload, signal) => {
+              const session = await createUser(payload.display_name, payload.avatar_emoji, payload.avatar_color, signal);
+              if (signal.aborted) return;
               await Promise.all([
                 AsyncStorage.setItem(USER_ID_KEY, session.user.id),
                 AsyncStorage.setItem(SESSION_TOKEN_KEY, session.access_token),
               ]);
               configureApiCredential(session.access_token);
               sessionEpoch.activate();
+              identityRequests.activate(session.user.id);
               setSessionAccessToken(session.access_token);
               setUser(session.user);
               setScreen(pendingInviteCode ? "invites" : "home");
@@ -479,8 +592,9 @@ export default function App() {
           <ProfileScreen
             user={user}
             onCancel={() => setScreen("home")}
-            onSave={async (payload) => {
-              const updated = await updateUser(user.id, payload);
+            onSave={async (payload, signal) => {
+              const updated = await updateUser(user.id, payload, signal);
+              if (signal.aborted) return;
               setUser(updated);
               setScreen("home");
             }}
@@ -498,7 +612,8 @@ export default function App() {
             }}
             onEditProfile={() => setScreen("edit_profile")}
             onCreateGame={() => setScreen("invites")}
-            onOpenGame={openGame}
+            onOpenGame={(game) => void openGameById(game.id)}
+            openingGameId={openingGameId}
             onOpenDebug={() => setScreen("debug")}
           />
         )}
@@ -572,4 +687,16 @@ export default function App() {
 
 function getErrorMessage(error: unknown) {
   return error instanceof Error ? error.message : "Unknown error";
+}
+
+function gameScopeKey(userId: string, gameId: string) {
+  return `${userId}:${gameId}`;
+}
+
+function friendlyGameLinkError(error: unknown) {
+  if (error instanceof ApiError && (error.status === 401 || error.status === 403)) {
+    return "This game is not available to the current profile.";
+  }
+  if (error instanceof ApiError && error.status === 404) return "This game no longer exists.";
+  return getErrorMessage(error);
 }

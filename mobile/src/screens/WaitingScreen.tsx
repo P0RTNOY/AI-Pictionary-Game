@@ -5,6 +5,7 @@ import { retryGeneration } from "../api/rounds";
 import { PrimaryButton, SecondaryButton } from "../components/Buttons";
 import { colors, styles } from "../styles";
 import type { Round } from "../types/game";
+import { artifactProvider, isMockArtifact } from "../utils/providerProvenance";
 
 export function WaitingScreen({
   round,
@@ -18,6 +19,8 @@ export function WaitingScreen({
   onContinue: () => void;
 }) {
   const pulse = useRef(new Animated.Value(0.65)).current;
+  const retryInFlight = useRef(false);
+  const retryController = useRef<AbortController | null>(null);
   const [loading, setLoading] = useState(false);
   const readyCount = useMemo(() => round.generated_svgs.filter((svg) => svg.status === "done" && svg.svg_text).length, [round]);
   const allFailed = round.generated_svgs.length > 0 && round.generated_svgs.every((svg) => svg.status === "failed");
@@ -31,23 +34,42 @@ export function WaitingScreen({
       ]),
     );
     animation.start();
-    return () => animation.stop();
+    return () => {
+      animation.stop();
+      retryController.current?.abort();
+    };
   }, [pulse]);
 
   async function retry() {
+    if (retryInFlight.current) return;
+    retryInFlight.current = true;
+    const controller = new AbortController();
+    retryController.current = controller;
     setLoading(true);
     try {
-      const updated = await retryGeneration(round.id);
+      const updated = await retryGeneration(round.id, controller.signal);
+      if (controller.signal.aborted) return;
       onRetry(updated);
     } catch (error) {
-      Alert.alert("Could not retry artists", error instanceof Error ? error.message : "Unknown error");
+      if (!controller.signal.aborted) Alert.alert("Could not retry artists", error instanceof Error ? error.message : "Unknown error");
     } finally {
-      setLoading(false);
+      if (!controller.signal.aborted) setLoading(false);
+      retryInFlight.current = false;
+      if (retryController.current === controller) retryController.current = null;
     }
   }
 
+  const isMock = isMockArtifact(round.generated_svgs);
+  const provider = artifactProvider(round.generated_svgs);
+
   return (
     <ScrollView contentContainerStyle={styles.content}>
+      {isMock && (
+        <View accessible accessibilityLabel="Mock output, testing only" style={[styles.panel, styles.mockWarning]}>
+          <Text style={[styles.gameTitle, { color: colors.paper }]}>Mock output — testing only</Text>
+        </View>
+      )}
+      {!isMock && provider && <Text style={styles.tinyText}>Artifact provider: {provider}</Text>}
       <Text style={styles.sectionTitle}>{round.status === "ready_to_guess" ? "Ready" : "Artists are drawing"}</Text>
       <Text style={styles.mutedText}>
         {readyCount ? `${readyCount} artist${readyCount === 1 ? "" : "s"} ready. You can play with any successful sketch.` : "Each artist saves independently, so one slow model will not block the whole round."}
@@ -61,13 +83,14 @@ export function WaitingScreen({
             <View style={styles.gameRowMain}>
               <Text style={styles.artistName}>{artistLabel(svg.model_tier)}</Text>
               <Text style={styles.mutedText}>{artistStatus(svg.status, svg.generation_time_seconds, svg.error_message, svg.attempts)}</Text>
+              <Text style={styles.tinyText}>Provider: {svg.provider_used ?? "not recorded"}</Text>
             </View>
             {svg.status === "done" ? <CheckCircle2 size={24} color={colors.mint} /> : svg.status === "failed" ? <RotateCcw size={22} color={colors.coral} /> : <ActivityIndicator color={colors.blue} />}
           </View>
         ))}
       </View>
       {canContinue && <PrimaryButton label="Guess now" icon={<CheckCircle2 size={20} color={colors.paper} />} onPress={onContinue} />}
-      {allFailed && <SecondaryButton label="Retry artists" icon={<RotateCcw size={18} color={colors.ink} />} onPress={retry} />}
+      {allFailed && <SecondaryButton label="Retry artists" icon={<RotateCcw size={18} color={colors.ink} />} onPress={retry} loading={loading} />}
       {loading && <Text style={styles.mutedText}>Restarting the artist queue...</Text>}
     </ScrollView>
   );

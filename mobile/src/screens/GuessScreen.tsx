@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Alert, ScrollView, Text, TextInput, View } from "react-native";
 import { AlertTriangle, CheckCircle2, Eye } from "lucide-react-native";
 import { SvgXml } from "react-native-svg";
@@ -8,6 +8,7 @@ import { colors, styles } from "../styles";
 import type { GuessResult, Round } from "../types/game";
 import { captureMessage } from "../utils/errorReporter";
 import { warningHaptic } from "../utils/haptics";
+import { artifactProvider, isMockArtifact } from "../utils/providerProvenance";
 
 export function GuessScreen({
   round,
@@ -20,11 +21,16 @@ export function GuessScreen({
   userId: string;
   onResult: (result: GuessResult) => void;
 }) {
+  const submitInFlight = useRef(false);
+  const confirmationOpen = useRef(false);
+  const submitController = useRef<AbortController | null>(null);
   const [guess, setGuess] = useState("");
   const [loading, setLoading] = useState(false);
   const [visibleCount, setVisibleCount] = useState(1);
   const readySketches = useMemo(() => round.generated_svgs.filter((svg) => svg.status === "done" && svg.svg_text), [round]);
   const visibleSketches = readySketches.slice(0, visibleCount);
+
+  useEffect(() => () => submitController.current?.abort(), []);
 
   if (round.game_id && round.game_id !== gameId) {
     return (
@@ -39,26 +45,35 @@ export function GuessScreen({
   }
 
   async function submit() {
+    if (submitInFlight.current || confirmationOpen.current) return;
     if (guess.trim().length < 2) return;
     if (guess.trim().split(/\s+/).length < 3) {
+      confirmationOpen.current = true;
       Alert.alert("Submit short guess?", "Short guesses are allowed, but a little more detail usually scores better.", [
-        { text: "Keep editing", style: "cancel" },
-        { text: "Submit", onPress: submitConfirmed },
-      ]);
+        { text: "Keep editing", style: "cancel", onPress: () => { confirmationOpen.current = false; } },
+        { text: "Submit", onPress: () => { confirmationOpen.current = false; void submitConfirmed(); } },
+      ], { onDismiss: () => { confirmationOpen.current = false; } });
       return;
     }
-    submitConfirmed();
+    void submitConfirmed();
   }
 
   async function submitConfirmed() {
+    if (submitInFlight.current) return;
+    submitInFlight.current = true;
+    const controller = new AbortController();
+    submitController.current = controller;
     setLoading(true);
     try {
-      const result = await submitGuess(round.id, guess.trim(), visibleCount);
+      const result = await submitGuess(round.id, guess.trim(), visibleCount, controller.signal);
+      if (controller.signal.aborted) return;
       onResult(result);
     } catch (error) {
-      Alert.alert("Could not score guess", error instanceof Error ? error.message : "Unknown error");
+      if (!controller.signal.aborted) Alert.alert("Could not score guess", error instanceof Error ? error.message : "Unknown error");
     } finally {
-      setLoading(false);
+      if (!controller.signal.aborted) setLoading(false);
+      submitInFlight.current = false;
+      if (submitController.current === controller) submitController.current = null;
     }
   }
 
@@ -70,14 +85,26 @@ export function GuessScreen({
     ]);
   }
 
+  const isMock = isMockArtifact(round.generated_svgs);
+  const provider = artifactProvider(round.generated_svgs);
+
   return (
     <ScrollView contentContainerStyle={styles.content}>
-      <Text style={styles.sectionTitle}>Guess the prompt</Text>
+      <Text style={styles.sectionTitle}>{isMock ? "Mock test art" : "AI-generated clues"}</Text>
       <Text style={styles.mutedText}>The original prompt stays hidden until scoring.</Text>
+      {isMock && (
+        <View accessible accessibilityLabel="Mock output, testing only" style={[styles.panel, styles.mockWarning]}>
+          <Text style={[styles.gameTitle, { color: colors.paper }]}>Mock output — testing only</Text>
+          <Text style={[styles.mutedText, { color: colors.paper }]}>
+            Mock mode uses prompt-derived labels and placeholder shapes. It verifies game flow, not real drawing quality. Use OpenRouter/local provider to evaluate prompt-to-image quality.
+          </Text>
+        </View>
+      )}
+      {!isMock && provider && <Text style={styles.tinyText}>Artifact provider: {provider}</Text>}
       <View style={styles.sketchGrid}>
         {visibleSketches.map((svg, index) => (
           <View key={svg.id} style={styles.sketchCard}>
-            <Text style={styles.sketchLabel}>Sketch {index + 1}</Text>
+            <Text style={styles.sketchLabel}>{svg.provider_used === "mock" ? "Mock test sketch" : "Sketch"} {index + 1} · {svg.provider_used ?? "provider not recorded"}</Text>
             {isRenderableSvg(svg.svg_text) ? (
               <SvgXml xml={svg.svg_text ?? ""} width="100%" height={220} />
             ) : (
@@ -103,7 +130,7 @@ export function GuessScreen({
       )}
       <View style={styles.fieldGroup}>
         <Text style={styles.label}>Your guess</Text>
-        <TextInput value={guess} onChangeText={setGuess} style={styles.input} placeholder="giraffe gives dolphin piano lesson" placeholderTextColor={colors.muted} />
+        <TextInput accessibilityLabel="Your guess" editable={!loading} value={guess} onChangeText={setGuess} style={styles.input} placeholder="giraffe gives dolphin piano lesson" placeholderTextColor={colors.muted} />
         <Text style={styles.mutedText}>{visibleCount > 1 ? "Extra clues reduce the score." : "First clue only keeps the full score."}</Text>
       </View>
       <PrimaryButton

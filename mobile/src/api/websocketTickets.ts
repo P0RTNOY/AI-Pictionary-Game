@@ -5,9 +5,10 @@ export type WebSocketTicket = {
   expires_at: string;
 };
 
-export function createWebSocketTicket(gameId: string): Promise<WebSocketTicket> {
+export function createWebSocketTicket(gameId: string, signal?: AbortSignal): Promise<WebSocketTicket> {
   return apiFetch<WebSocketTicket>(`/games/${encodeURIComponent(gameId)}/websocket-ticket`, {
     method: "POST",
     body: JSON.stringify({}),
+    signal,
   });
 }

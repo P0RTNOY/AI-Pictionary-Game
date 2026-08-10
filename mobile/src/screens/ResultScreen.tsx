@@ -7,6 +7,7 @@ import { ResultLine, TagBlock } from "../components/ResultBlocks";
 import { colors, styles } from "../styles";
 import type { GameStats, Round } from "../types/game";
 import { successHaptic } from "../utils/haptics";
+import { artifactProvider, isMockArtifact } from "../utils/providerProvenance";
 
 export function ResultScreen({
   round,
@@ -55,8 +56,17 @@ export function ResultScreen({
     Alert.alert("Copied", "Result summary copied.");
   }
 
+  const isMock = isMockArtifact(round.generated_svgs);
+  const provider = artifactProvider(round.generated_svgs);
+
   return (
     <ScrollView contentContainerStyle={styles.content}>
+      {isMock && (
+        <View accessible accessibilityLabel="Mock output, testing only" style={[styles.panel, styles.mockWarning]}>
+          <Text style={[styles.gameTitle, { color: colors.paper }]}>Mock output — testing only</Text>
+        </View>
+      )}
+      {!isMock && provider && <Text style={styles.tinyText}>Artifact provider: {provider}</Text>}
       <View style={styles.scorePanel}>
         <Text style={styles.scoreNumber}>{displayScore}</Text>
         <Text style={styles.scoreLabel}>{scoreLabel(round.guess.score)}</Text>

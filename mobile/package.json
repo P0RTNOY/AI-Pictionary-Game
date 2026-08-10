@@ -9,6 +9,7 @@
     "android": "expo run:android",
     "web": "expo start --web",
     "typecheck": "tsc --noEmit",
+    "test:task5-lifecycle": "node scripts/test-task5-lifecycle.js",
     "test:task4-lifecycle": "node scripts/test-task4-lifecycle.js",
     "test:task3-security": "node scripts/test-task3-security.js"
   },

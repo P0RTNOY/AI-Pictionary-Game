@@ -19,7 +19,8 @@ export function PrimaryButton({
   return (
     <Pressable
       accessibilityRole="button"
-      accessibilityState={{ disabled: Boolean(disabled || loading) }}
+      accessibilityLabel={loading ? `${label}, in progress` : label}
+      accessibilityState={{ disabled: Boolean(disabled || loading), busy: Boolean(loading) }}
       disabled={disabled || loading}
       onPress={() => {
         tapHaptic();
@@ -49,7 +50,8 @@ export function SecondaryButton({
   return (
     <Pressable
       accessibilityRole="button"
-      accessibilityState={{ disabled: Boolean(disabled || loading) }}
+      accessibilityLabel={loading ? `${label}, in progress` : label}
+      accessibilityState={{ disabled: Boolean(disabled || loading), busy: Boolean(loading) }}
       disabled={disabled || loading}
       onPress={() => {
         tapHaptic();

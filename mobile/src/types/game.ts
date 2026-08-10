@@ -15,6 +15,7 @@ export type GeneratedSvg = {
   id: string;
   model_name: string;
   model_tier: string;
+  provider_used: string | null;
   svg_text: string | null;
   generation_time_seconds: number | null;
   status: SvgStatus;

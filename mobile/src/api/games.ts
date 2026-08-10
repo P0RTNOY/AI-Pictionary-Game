@@ -8,18 +8,18 @@ export function createGame(player1Id: string, player2Id: string): Promise<Game> 
   });
 }
 
-export function listGames(userId: string): Promise<Game[]> {
-  return apiFetch<Game[]>(`/users/${userId}/games`);
+export function listGames(userId: string, signal?: AbortSignal): Promise<Game[]> {
+  return apiFetch<Game[]>(`/users/${userId}/games`, { signal });
 }
 
-export function getGame(gameId: string): Promise<Game> {
-  return apiFetch<Game>(`/games/${gameId}`);
+export function getGame(gameId: string, signal?: AbortSignal): Promise<Game> {
+  return apiFetch<Game>(`/games/${gameId}`, { signal });
 }
 
-export function listEvents(gameId: string, afterId = 0): Promise<GameEvent[]> {
-  return apiFetch<GameEvent[]>(`/games/${gameId}/events?after_id=${afterId}`);
+export function listEvents(gameId: string, afterId = 0, signal?: AbortSignal): Promise<GameEvent[]> {
+  return apiFetch<GameEvent[]>(`/games/${gameId}/events?after_id=${afterId}`, { signal });
 }
 
-export function getGameStats(gameId: string): Promise<GameStats> {
-  return apiFetch<GameStats>(`/games/${gameId}/stats`);
+export function getGameStats(gameId: string, signal?: AbortSignal): Promise<GameStats> {
+  return apiFetch<GameStats>(`/games/${gameId}/stats`, { signal });
 }

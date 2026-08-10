@@ -14,6 +14,7 @@ export function HomeScreen({
   refreshing,
   onEditProfile,
   onOpenGame,
+  openingGameId,
   onOpenDebug,
 }: {
   user: User;
@@ -24,6 +25,7 @@ export function HomeScreen({
   refreshing: boolean;
   onEditProfile: () => void;
   onOpenGame: (game: Game) => void;
+  openingGameId: string | null;
   onOpenDebug: () => void;
 }) {
   const yourTurn = games.filter((game) => isYourTurn(game, user.id));
@@ -64,9 +66,9 @@ export function HomeScreen({
 
       {games.length ? (
         <>
-          <GameSection title="Your turn" games={yourTurn} user={user} empty="Nothing needs you right now." onOpenGame={onOpenGame} />
-          <GameSection title="Waiting" games={waiting} user={user} empty="No games are waiting on someone else." onOpenGame={onOpenGame} />
-          <GameSection title="Completed" games={completed} user={user} empty="Completed rounds will appear here." onOpenGame={onOpenGame} />
+          <GameSection title="Your turn" games={yourTurn} user={user} empty="Nothing needs you right now." onOpenGame={onOpenGame} openingGameId={openingGameId} />
+          <GameSection title="Waiting" games={waiting} user={user} empty="No games are waiting on someone else." onOpenGame={onOpenGame} openingGameId={openingGameId} />
+          <GameSection title="Completed" games={completed} user={user} empty="Completed rounds will appear here." onOpenGame={onOpenGame} openingGameId={openingGameId} />
         </>
       ) : (
         <View style={styles.panel}>
@@ -75,12 +77,14 @@ export function HomeScreen({
         </View>
       )}
 
+      <PrimaryButton label="Create invite" icon={<Plus size={20} color={colors.paper} />} onPress={onCreateGame} disabled={openingGameId !== null} />
       <View style={styles.row}>
         <View style={styles.rowFill}>
-          <PrimaryButton label="Create invite" icon={<Plus size={20} color={colors.paper} />} onPress={onCreateGame} />
+          <SecondaryButton label="Join with invite" icon={<Link size={18} color={colors.ink} />} onPress={onCreateGame} disabled={openingGameId !== null} />
         </View>
-        <SecondaryButton label="Join" icon={<Link size={18} color={colors.ink} />} onPress={onCreateGame} />
-        <SecondaryButton label="Refresh" icon={<RefreshCw size={18} color={colors.ink} />} onPress={onRefresh} />
+        <View style={styles.rowFill}>
+          <SecondaryButton label="Refresh games" icon={<RefreshCw size={18} color={colors.ink} />} onPress={onRefresh} loading={refreshing} disabled={openingGameId !== null} />
+        </View>
       </View>
     </ScrollView>
   );
@@ -92,29 +96,33 @@ function GameSection({
   user,
   empty,
   onOpenGame,
+  openingGameId,
 }: {
   title: string;
   games: Game[];
   user: User;
   empty: string;
   onOpenGame: (game: Game) => void;
+  openingGameId: string | null;
 }) {
   return (
     <View style={{ gap: 10 }}>
       <Text style={styles.sectionHeader}>{title}</Text>
-      {games.length ? games.map((game) => <GameRow key={game.id} game={game} user={user} onOpenGame={onOpenGame} />) : <Text style={styles.mutedText}>{empty}</Text>}
+      {games.length ? games.map((game) => <GameRow key={game.id} game={game} user={user} onOpenGame={onOpenGame} opening={openingGameId === game.id} disabled={openingGameId !== null} />) : <Text style={styles.mutedText}>{empty}</Text>}
     </View>
   );
 }
 
-function GameRow({ game, user, onOpenGame }: { game: Game; user: User; onOpenGame: (game: Game) => void }) {
+function GameRow({ game, user, onOpenGame, opening, disabled }: { game: Game; user: User; onOpenGame: (game: Game) => void; opening: boolean; disabled: boolean }) {
   const opponent = game.opponent;
   const status = statusForGame(game, user.id);
   const isNew = game.latest_round?.status === "ready_to_guess" && game.latest_round.guesser_user_id === user.id;
   return (
     <Pressable
       accessibilityRole="button"
-      accessibilityLabel="Open game"
+      accessibilityLabel={`${opening ? "Opening" : "Open game with"} ${opponent?.display_name ?? "unknown opponent"}. ${gameDescription(game, user.id)}`}
+      accessibilityState={{ disabled, busy: opening }}
+      disabled={disabled}
       onPress={() => onOpenGame(game)}
       style={({ pressed }) => [styles.gameRow, pressed && styles.pressed]}
     >
@@ -131,7 +139,7 @@ function GameRow({ game, user, onOpenGame }: { game: Game; user: User; onOpenGam
           )}
         </View>
         <Text style={styles.gamePrompt} numberOfLines={2}>
-          {gameDescription(game, user.id)}
+          {opening ? "Opening game…" : gameDescription(game, user.id)}
         </Text>
         <Text style={styles.tinyText}>Last activity {formatRelative(game.latest_round?.updated_at ?? game.updated_at)}</Text>
       </View>
