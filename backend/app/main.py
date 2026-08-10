@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -54,6 +55,25 @@ from app.orm_models import User as UserORM
 
 logger = logging.getLogger("ai_pictionary.api")
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
+
+
+class UvicornWebSocketQueryFilter(logging.Filter):
+    _ticket_pattern = re.compile(r"([?&]ticket=)[^&\s\"]+")
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if isinstance(record.args, tuple):
+            record.args = tuple(
+                self._ticket_pattern.sub(r"\1%5BREDACTED%5D", value)
+                if isinstance(value, str)
+                else value
+                for value in record.args
+            )
+        return True
+
+
+uvicorn_error_logger = logging.getLogger("uvicorn.error")
+if not any(isinstance(installed, UvicornWebSocketQueryFilter) for installed in uvicorn_error_logger.filters):
+    uvicorn_error_logger.addFilter(UvicornWebSocketQueryFilter())
 
 
 def safe_request_path(path: str) -> str:

@@ -285,6 +285,26 @@ async def test_idle_websocket_observes_client_disconnect_without_waiting_for_an_
     ]
 
 
+def test_uvicorn_websocket_handshake_logs_redact_single_use_ticket():
+    raw_ticket = "single-use-ticket-must-not-enter-logs"
+    record = logging.LogRecord(
+        name="uvicorn.error",
+        level=logging.INFO,
+        pathname=__file__,
+        lineno=1,
+        msg='%s - "WebSocket %s" [accepted]',
+        args=(("127.0.0.1", 12345), f"/ws/games/game-id?ticket={raw_ticket}&after_id=7"),
+        exc_info=None,
+    )
+
+    for installed_filter in logging.getLogger("uvicorn.error").filters:
+        assert installed_filter.filter(record) is True
+    rendered = record.getMessage()
+    assert raw_ticket not in rendered
+    assert "ticket=%5BREDACTED%5D" in rendered
+    assert "after_id=7" in rendered
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("failure_mode", ["malformed", "oversized", "timeout", "http_error", "unavailable"])
 async def test_local_provider_failures_end_in_stable_retryable_round_state(
