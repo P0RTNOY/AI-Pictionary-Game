@@ -188,7 +188,7 @@ class GameInvitePreview(BaseModel):
 
 
 class InviteCodeRequest(BaseModel):
-    code: str = Field(min_length=16, max_length=64)
+    code: str = Field(min_length=6, max_length=64)
 
 
 class InviteJoin(BaseModel):

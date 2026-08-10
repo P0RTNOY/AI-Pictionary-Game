@@ -188,13 +188,6 @@ def debug_send_test_notification(payload: TestNotificationRequest, actor: UserOR
     return services.send_debug_test_notification(db, actor.id, game_id=payload.game_id)
 
 
-@app.post("/debug/reset-local-data")
-def debug_reset_local_data(actor: UserORM = Depends(current_user), db: Session = Depends(get_db)) -> dict:
-    require_debug()
-    deleted = services.reset_local_database(db)
-    return {"deleted": deleted, "ok": True}
-
-
 @app.post("/users", response_model=UserSession, status_code=201)
 def create_user(payload: UserCreate, db: Session = Depends(get_db)) -> UserSession:
     return services.create_user_session(db, payload)

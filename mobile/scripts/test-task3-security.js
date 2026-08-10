@@ -18,13 +18,21 @@ const compiledBootstrap = ts.transpileModule(bootstrap, {
 }).outputText;
 const bootstrapModule = { exports: {} };
 new Function("exports", "module", compiledBootstrap)(bootstrapModule.exports, bootstrapModule);
-const { decideSessionBootstrap } = bootstrapModule.exports;
+const { decideSessionBootstrap, restoredSessionDestination } = bootstrapModule.exports;
 assert.equal(decideSessionBootstrap(false, false), "reonboard");
 assert.equal(decideSessionBootstrap(true, true), "restore");
 assert.equal(decideSessionBootstrap(true, true, "unauthorized"), "reonboard");
 assert.equal(decideSessionBootstrap(true, true, "transient"), "retry");
+assert.equal(restoredSessionDestination(false), "home");
+assert.equal(restoredSessionDestination(true), "invites");
+const transientThenSuccessfulRetry = [
+  decideSessionBootstrap(true, true, "transient"),
+  restoredSessionDestination(false),
+];
+assert.deepEqual(transientThenSuccessfulRetry, ["retry", "home"]);
 assert.match(app, /isUnauthorizedError/);
 assert.match(app, /startup_error/);
+assert.match(app, /setScreen\(restoredSessionDestination\(Boolean\(pendingInviteCode\)\)\)/);
 assert.doesNotMatch(events, /access_token=/);
 assert.match(events, /createWebSocketTicket/);
 assert.doesNotMatch(invites, /\/invites\/\$\{/);

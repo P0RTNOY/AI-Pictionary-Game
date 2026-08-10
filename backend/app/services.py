@@ -12,7 +12,7 @@ from threading import Lock
 from typing import Any, Optional
 
 from fastapi import HTTPException
-from sqlalchemy import func, or_, select, text, update
+from sqlalchemy import delete, func, or_, select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
@@ -94,18 +94,50 @@ def issue_websocket_ticket(db: Session, game_id: str, user_id: str) -> WebSocket
     if not game:
         raise HTTPException(status_code=404, detail="Game not found")
     require_game_participant(game, user_id)
-    raw_ticket = secrets.token_urlsafe(32)
-    expires_at = now() + timedelta(seconds=WEBSOCKET_TICKET_TTL_SECONDS)
-    db.add(
-        WebSocketTicketORM(
-            id=new_id(),
-            ticket_hash=hash_access_token(raw_ticket),
-            user_id=user_id,
-            game_id=game_id,
-            expires_at=expires_at,
+    issued_at = now()
+    db.execute(
+        delete(WebSocketTicketORM)
+        .where(
+            or_(
+                WebSocketTicketORM.consumed_at.is_not(None),
+                WebSocketTicketORM.expires_at <= issued_at,
+            )
         )
+        .execution_options(synchronize_session=False)
     )
-    db.commit()
+    raw_ticket = secrets.token_urlsafe(32)
+    ticket_hash = hash_access_token(raw_ticket)
+    expires_at = issued_at + timedelta(seconds=WEBSOCKET_TICKET_TTL_SECONDS)
+    rotation = db.execute(
+        update(WebSocketTicketORM)
+        .where(
+            WebSocketTicketORM.user_id == user_id,
+            WebSocketTicketORM.game_id == game_id,
+        )
+        .values(
+            ticket_hash=ticket_hash,
+            expires_at=expires_at,
+            consumed_at=None,
+            created_at=issued_at,
+        )
+        .execution_options(synchronize_session=False)
+    )
+    if rotation.rowcount == 0:
+        db.add(
+            WebSocketTicketORM(
+                id=new_id(),
+                ticket_hash=ticket_hash,
+                user_id=user_id,
+                game_id=game_id,
+                expires_at=expires_at,
+                created_at=issued_at,
+            )
+        )
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="WebSocket ticket issuance conflict") from exc
     return WebSocketTicket(ticket=raw_ticket, expires_at=serialize_dt(expires_at) or "")
 
 
@@ -1282,32 +1314,3 @@ def to_device_token_schema(token: DeviceTokenORM) -> DeviceToken:
         created_at=serialize_dt(token.created_at) or "",
         updated_at=serialize_dt(token.updated_at) or "",
     )
-
-
-def reset_local_database(db: Session) -> dict[str, int]:
-    """
-    Deletes all records from the local database in an order that respects foreign keys.
-    Returns a dictionary of deleted row counts by table.
-    """
-    tables_to_delete = [
-        ("websocket_tickets", WebSocketTicketORM),
-        ("notification_attempts", NotificationAttemptORM),
-        ("device_tokens", DeviceTokenORM),
-        ("generated_svgs", GeneratedSvgORM),
-        ("guesses", GuessORM),
-        ("game_events", GameEventORM),
-        ("rounds", RoundORM),
-        ("game_invites", GameInviteORM),
-        ("games", GameORM),
-        ("users", UserORM),
-    ]
-
-    deleted_counts = {}
-    for table_name, model in tables_to_delete:
-        from sqlalchemy import delete
-        result = db.execute(delete(model))
-        deleted_counts[table_name] = result.rowcount
-
-    db.commit()
-    logger.info("database.reset_local_data", extra={"deleted": deleted_counts})
-    return deleted_counts

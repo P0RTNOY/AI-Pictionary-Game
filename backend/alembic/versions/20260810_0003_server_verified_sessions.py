@@ -42,6 +42,14 @@ def upgrade() -> None:
     op.create_index("ix_websocket_tickets_ticket_hash", "websocket_tickets", ["ticket_hash"], unique=True)
     op.create_index("ix_websocket_tickets_user_id", "websocket_tickets", ["user_id"])
     op.create_index("ix_websocket_tickets_game_id", "websocket_tickets", ["game_id"])
+    op.create_index("ix_websocket_tickets_expires_at", "websocket_tickets", ["expires_at"])
+    op.create_index("ix_websocket_tickets_consumed_at", "websocket_tickets", ["consumed_at"])
+    op.create_index(
+        "uq_websocket_tickets_user_game",
+        "websocket_tickets",
+        ["user_id", "game_id"],
+        unique=True,
+    )
 
     op.create_table(
         "task3_guess_conflict_archive",
@@ -90,7 +98,7 @@ def upgrade() -> None:
             FROM (
                 SELECT id, status,
                        ROW_NUMBER() OVER (
-                           PARTITION BY game_id ORDER BY created_at ASC, id ASC
+                           PARTITION BY game_id ORDER BY created_at DESC, id DESC
                        ) AS task3_rank
                 FROM rounds
                 WHERE status IN ('generating', 'ready_to_guess')
@@ -144,6 +152,9 @@ def downgrade() -> None:
     op.drop_table("task3_active_round_archive")
     op.drop_table("task3_guess_conflict_archive")
 
+    op.drop_index("uq_websocket_tickets_user_game", table_name="websocket_tickets")
+    op.drop_index("ix_websocket_tickets_consumed_at", table_name="websocket_tickets")
+    op.drop_index("ix_websocket_tickets_expires_at", table_name="websocket_tickets")
     op.drop_index("ix_websocket_tickets_game_id", table_name="websocket_tickets")
     op.drop_index("ix_websocket_tickets_user_id", table_name="websocket_tickets")
     op.drop_index("ix_websocket_tickets_ticket_hash", table_name="websocket_tickets")

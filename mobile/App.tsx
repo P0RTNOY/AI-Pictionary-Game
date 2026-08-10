@@ -25,7 +25,7 @@ import type { Game, GameStats, GuessResult, Round, User } from "./src/types/game
 import { appDiagnostics } from "./src/config";
 import { parseInviteCodeFromUrl } from "./src/utils/deepLinks";
 import { captureError, captureMessage } from "./src/utils/errorReporter";
-import { decideSessionBootstrap } from "./src/sessionBootstrap";
+import { decideSessionBootstrap, restoredSessionDestination } from "./src/sessionBootstrap";
 
 type Screen = "onboarding" | "home" | "profile_setup" | "edit_profile" | "invites" | "create_round" | "waiting" | "guess" | "result" | "debug" | "startup_error";
 
@@ -164,6 +164,8 @@ export default function App() {
     try {
       const existing = await getUser(storedId!);
       setUser(existing);
+      setStartupError(null);
+      setScreen(restoredSessionDestination(Boolean(pendingInviteCode)));
     } catch (error) {
       const failure = isUnauthorizedError(error) ? "unauthorized" : "transient";
       if (decideSessionBootstrap(true, true, failure) === "reonboard") {

@@ -82,7 +82,7 @@ def _apply_sqlite_light_migrations(bind=engine) -> None:
                 "round_id VARCHAR(64) PRIMARY KEY, original_status VARCHAR(40) NOT NULL)",
                 "INSERT OR IGNORE INTO task3_active_round_archive (round_id, original_status) "
                 "SELECT id, status FROM (SELECT id, status, ROW_NUMBER() OVER ("
-                "PARTITION BY game_id ORDER BY created_at ASC, id ASC) task3_rank FROM rounds "
+                "PARTITION BY game_id ORDER BY created_at DESC, id DESC) task3_rank FROM rounds "
                 "WHERE status IN ('generating', 'ready_to_guess')) ranked WHERE task3_rank > 1",
                 "UPDATE rounds SET status = 'failed' WHERE id IN (SELECT round_id FROM task3_active_round_archive)",
             ]
@@ -94,6 +94,19 @@ def _apply_sqlite_light_migrations(bind=engine) -> None:
     if "generation_admission_gate" in inspector.get_table_names():
         statements.append(
             "INSERT INTO generation_admission_gate (id, version) VALUES (1, 0) ON CONFLICT(id) DO NOTHING"
+        )
+    if "websocket_tickets" in inspector.get_table_names():
+        statements.extend(
+            [
+                "DELETE FROM websocket_tickets WHERE id IN (SELECT id FROM ("
+                "SELECT id, ROW_NUMBER() OVER (PARTITION BY user_id, game_id "
+                "ORDER BY created_at DESC, id DESC) task3_rank FROM websocket_tickets"
+                ") ranked WHERE task3_rank > 1)",
+                "CREATE INDEX IF NOT EXISTS ix_websocket_tickets_expires_at ON websocket_tickets (expires_at)",
+                "CREATE INDEX IF NOT EXISTS ix_websocket_tickets_consumed_at ON websocket_tickets (consumed_at)",
+                "CREATE UNIQUE INDEX IF NOT EXISTS uq_websocket_tickets_user_game "
+                "ON websocket_tickets (user_id, game_id)",
+            ]
         )
     with bind.begin() as connection:
         for statement in statements:

@@ -46,6 +46,11 @@ class Game(TimestampMixin, Base):
 
 class WebSocketTicket(Base):
     __tablename__ = "websocket_tickets"
+    __table_args__ = (
+        Index("uq_websocket_tickets_user_game", "user_id", "game_id", unique=True),
+        Index("ix_websocket_tickets_expires_at", "expires_at"),
+        Index("ix_websocket_tickets_consumed_at", "consumed_at"),
+    )
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     ticket_hash: Mapped[str] = mapped_column(String(64), nullable=False, unique=True, index=True)
