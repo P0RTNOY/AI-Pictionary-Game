@@ -1,184 +1,215 @@
 # Release Candidate QA
 
-## EAS Development Build Setup
+Use this checklist against one immutable candidate commit. Record the commit, build IDs, backend deployment, device/OS versions, provider, and pass/fail result in [RELEASE_READINESS.md](RELEASE_READINESS.md). Never record bearer tokens, invite capabilities, API keys, Expo tokens, or `.env` contents.
 
-Install and log in:
+## Candidate identity
 
-```bash
-npm install -g eas-cli
-eas login
-```
+- Candidate commit: `<full SHA>`
+- Branch/remote: `<remote branch>`
+- Pull request: `<URL or unavailable>`
+- Backend deployment/revision: `<identifier>`
+- iOS build/device/OS: `<identifier>`
+- Android build/device/OS: `<identifier>`
+- AI provider: `<mock | openrouter | local>`
+- Notification provider: `<mock | expo>`
 
-Create a development build:
+## Automated preflight
 
-```bash
-cd mobile
-eas build --profile development --platform ios
-eas build --profile development --platform android
-```
-
-Run a local dev server for the development build:
+Backend, from `backend/` with the virtual environment active:
 
 ```bash
-cd mobile
-EXPO_PUBLIC_APP_ENV=local EXPO_PUBLIC_BUILD_PROFILE=development EXPO_PUBLIC_API_URL=http://YOUR_MAC_IP:8000 npx expo start --dev-client --host lan
+python -m pytest -q
 ```
 
-Preview/internal build:
+Disposable SQLite migration round trip:
 
 ```bash
-cd mobile
-eas build --profile preview --platform ios
-eas build --profile preview --platform android
+MIGRATION_DIR="$(mktemp -d "${TMPDIR:-/tmp}/ai-pictionary-rc.XXXXXX")"
+export DATABASE_URL="sqlite:///$MIGRATION_DIR/migrations.db"
+export ENV=test
+export DEBUG=true
+export AUTO_CREATE_TABLES=false
+alembic heads
+alembic upgrade head
+alembic current
+alembic downgrade -1
+alembic upgrade head
+alembic current
 ```
 
-Production build:
+Mobile, from `mobile/`:
 
 ```bash
-cd mobile
-eas build --profile production --platform all
+npm ci
+npm run test:task3-security
+npm run test:task4-lifecycle
+npm run test:task5-lifecycle
+node scripts/test-app-config.js
+npm run typecheck
+npx expo-doctor
+EXPO_NO_DOTENV=1 EXPO_PUBLIC_APP_ENV=development EXPO_PUBLIC_BUILD_PROFILE=development EXPO_PUBLIC_API_URL=http://127.0.0.1:8000 npx expo config --type public --json
 ```
 
-Expo Go is still useful for quick UI checks. Use a development build for realistic push notifications, native notification taps, and custom-scheme deep-link testing.
+The repository CI workflow performs the same core checks with mock providers and no external credentials. A green CI run does not substitute for the physical-device, live-provider, push, or target-PostgreSQL checks below.
 
-## Environment Profiles
+## Release environment
 
-Mobile public env vars:
-
-```bash
-EXPO_PUBLIC_APP_ENV=local
-EXPO_PUBLIC_BUILD_PROFILE=development
-EXPO_PUBLIC_API_URL=http://YOUR_MAC_IP:8000
-```
-
-Suggested profiles:
-
-- Local LAN: `EXPO_PUBLIC_APP_ENV=local`, `EXPO_PUBLIC_API_URL=http://YOUR_MAC_IP:8000`
-- Development build: `EXPO_PUBLIC_BUILD_PROFILE=development`
-- Preview/staging: `EXPO_PUBLIC_APP_ENV=staging`, `EXPO_PUBLIC_API_URL=https://api-staging.your-domain.com`
-- Production: `EXPO_PUBLIC_APP_ENV=production`, `EXPO_PUBLIC_API_URL=https://api.your-domain.com`
-
-Backend release-candidate env:
+Example backend shape (place values in the deployment environment, not git):
 
 ```bash
 ENV=staging
 DEBUG=false
 AUTO_CREATE_TABLES=false
 DATABASE_URL=postgresql+psycopg://...
-CORS_ALLOW_ORIGINS=https://your-preview-app.example
+CORS_ALLOW_ORIGINS=https://your-preview-origin.example
 AI_PROVIDER=openrouter
 OPENROUTER_API_KEY=...
 NOTIFICATION_PROVIDER=expo
 EXPO_ACCESS_TOKEN=...
 ```
 
-Run migrations:
+Before backend startup:
 
 ```bash
-cd backend
-source .venv/bin/activate
 alembic upgrade head
+alembic current
 ```
 
-Health check:
+Verify `GET /health` and `GET /ai/status` after deployment. Confirm all debug data/reset/test-notification routes return `404` in staging/production, including when someone accidentally sets `DEBUG=true`.
+
+Mobile public configuration:
 
 ```bash
-curl https://your-api.example/health
+EXPO_PUBLIC_APP_ENV=staging
+EXPO_PUBLIC_BUILD_PROFILE=preview
+EXPO_PUBLIC_API_URL=https://api-staging.your-domain.example
 ```
 
-## Manual QA Checklist
+`EXPO_PUBLIC_API_URL` is public configuration, not a secret. Configure it as a plaintext EAS value in the matching `preview` or `production` environment before building. Release config intentionally fails for missing, malformed, non-HTTP(S), loopback, or unspecified URLs.
 
-- Install development build on iPhone.
-- Install development build on Android if available.
-- First launch onboarding appears.
-- Profile setup creates and persists user.
-- Beta debug shows app version, environment, build profile, API URL, and backend health.
-- Backend unreachable state appears when `EXPO_PUBLIC_API_URL` is wrong.
-- Create invite.
-- Share invite.
-- Open invite from cold start.
-- Open invite while app is already open.
-- Join invite after onboarding.
-- Self-join is blocked.
-- Expired invite is blocked.
-- Accepted invite cannot be joined twice.
-- Create prompt.
-- Generation success shows ready sketches.
-- Retry generation after failure.
-- Reveal clues and confirm penalty.
-- Submit guess.
-- Result screen shows score and components.
-- Turn switches correctly.
-- Push token registers on physical device.
-- Send test notification from Beta debug.
-- Tap notification opens correct game.
-- Backend restart preserves game state.
-- App restart preserves user/game state.
-- WebSocket reconnects.
-- Polling fallback works when WebSocket fails.
-- Original prompt is not visible to guesser before result.
-
-## Deep Link QA
+## EAS build setup
 
 ```bash
+npm install -g eas-cli
+eas login
 cd mobile
-npx uri-scheme open aipictionary://invite/ABC123 --ios
-npx uri-scheme open aipictionary://invite/ABC123 --android
+eas build --profile development --platform ios
+eas build --profile development --platform android
 ```
 
-Expected:
+Internal preview candidates:
 
-- App opens to Join Invite.
-- Invite code is prefilled.
-- If profile setup is unfinished, the invite is retained and shown after profile creation.
-- If backend is unreachable, user sees a recoverable error and can retry.
+```bash
+eas build --profile preview --platform ios
+eas build --profile preview --platform android
+```
 
-## Troubleshooting
+Production candidates:
 
-Phone cannot reach backend:
+```bash
+eas build --profile production --platform all
+```
 
-- Confirm backend runs with `--host 0.0.0.0`.
-- Confirm phone and Mac are on the same network.
-- Confirm `EXPO_PUBLIC_API_URL=http://YOUR_MAC_IP:8000`.
-- Check firewall/VPN.
+Remote EAS uses Continuous Native Generation because `.easignore` excludes the local native directories. Confirm the uploaded build uses the expected icon/splash, bundle/package identifiers, API URL, environment, build profile, and EAS project before distribution.
 
-Wrong API URL:
+## Session and authorization QA
 
-- Open Beta debug and inspect API URL/backend health.
-- Restart Expo after changing public env vars.
+- Fresh onboarding creates a profile and persists a usable bearer session across restart.
+- A deliberately incomplete legacy local profile (ID without token) returns to onboarding once.
+- Backend `401` clears a rejected session; network/`5xx` failure retains it and offers retry.
+- User/profile/game/round/event/device-token routes reject a missing or wrong bearer.
+- A participant cannot read another game's private state or events.
+- The guesser cannot read `original_prompt` before scoring.
+- Invite preview is public/minimal; invite create/join needs the authenticated actor.
+- Invite codes remain case-sensitive and are absent from request/error logs.
+- WebSocket uses a fresh short-lived ticket, not the bearer token in the URL; reuse and cross-game use fail.
 
-Push token missing:
+## Two-device lifecycle QA
 
-- Use a physical device.
-- Use a development build for real testing.
-- Check iOS/Android notification permissions.
-- Tap Refresh push token in Beta debug.
+Run with two fresh sessions after a safe local/test reset or against isolated staging test data:
 
-Notification not received:
+- Create an invite on device A and join on device B.
+- Confirm device A owns the initial turn and device B waits.
+- Create a prompt; confirm only the creator can read it before the result.
+- Confirm all three artifact rows persist the actual `provider_used`.
+- In mock mode, waiting/guess/result screens show **Mock output — testing only**.
+- Reveal clues, verify warning/penalty, submit one guess, and inspect score components.
+- Confirm turn change, create a second round on device B, and complete it.
+- Confirm game statistics, Home grouping, activity, and badges update on both devices.
+- Switch rapidly between two games; stale fetch/poll completions must not overwrite the selected game.
+- Background/foreground during round load and mutation; duplicate actions and stale callbacks must not apply.
+- Disconnect/reconnect network; WebSocket recovery and polling fallback must remain bounded and avoid duplicate events.
+- Restart app and backend; valid session and migrated game state persist.
 
-- Confirm `NOTIFICATION_PROVIDER=expo`.
-- Confirm `EXPO_ACCESS_TOKEN`.
-- Check `/debug/notification-outbox` in non-production debug mode.
-- Confirm the token row exists via logs/debug tooling.
+## Provider QA
 
-Invite link opens app but does not join:
+In **Beta debug**, treat these as different signals:
 
-- Check backend health in Beta debug.
-- Tap Check on the Join Invite screen.
-- Confirm invite is pending and not owned by the current user.
+- **AI provider** is the selected runtime provider.
+- **Judge model** is the configured OpenRouter judge-model row.
+- **Round Provider** is persisted artifact provenance.
 
-WebSocket disconnected:
+For live OpenRouter QA:
 
-- Beta debug should show polling fallback after repeated failures.
-- Confirm `GET /games/{game_id}/events` returns events.
+- set `AI_PROVIDER=openrouter` explicitly and provide the key through the secret store;
+- restart and verify **AI provider** says `openrouter`;
+- create a fresh round and confirm `provider_used=openrouter` with no mock warning;
+- visually review clue quality across all tiers;
+- verify judging with the configured judge model and local fallback when that setting is intentionally empty;
+- test a controlled provider error and generation retry; and
+- confirm per-user/global daily budgets and active-generation rejection are visible and recoverable.
 
-Backend CORS issue:
+Mock mode can pass lifecycle QA but cannot pass real drawing-quality QA. Local-provider unavailable/malformed/oversized-response behavior is automated; a real local model still needs its own quality run if it will ship.
 
-- Set explicit `CORS_ALLOW_ORIGINS` for staging/production.
-- Do not rely on wildcard CORS outside local/dev.
+## Push and notification QA
 
-Alembic migration issue:
+Use physical devices and an EAS development/preview build:
 
-- Confirm `DATABASE_URL` points to the intended database.
-- Run `alembic current`.
-- Run `alembic upgrade head`.
+- grant/deny permissions and confirm gameplay works in both cases;
+- register and refresh; debug displays only a token fingerprint;
+- send the authenticated local-debug test notification where allowed;
+- background the app, receive the notification, and tap through to an authorized game;
+- confirm another user's game cannot be opened from crafted notification data;
+- rotate identity/reset local app state and verify the old registration is retired;
+- confirm one provider/token has only one active owner and per-user fanout stays bounded; and
+- inspect provider delivery receipts through approved deployment tooling without copying raw device tokens.
+
+## Deep-link QA
+
+Development scheme:
+
+```bash
+npx uri-scheme open 'aipictionary://invite/AbcDef_123-xyz4567890' --ios
+npx uri-scheme open 'aipictionary://invite/AbcDef_123-xyz4567890' --android
+```
+
+Check cold/warm valid links, malformed/encoded-slash links, self/expired/accepted invites, session-not-ready handling, backend-unreachable recovery, and authenticated private game links. Production universal links/app links are not complete until the domain association files and native entitlements/intent filters are deployed and verified.
+
+## Accessibility and interaction QA
+
+- VoiceOver/TalkBack identifies game rows, invite actions, prompt parts, guess, retry, reset, and color choices.
+- Selected color/avatar state is announced and not communicated by color alone.
+- Busy actions announce loading and cannot be submitted twice.
+- Touch targets are usable on the smallest supported phone.
+- Dynamic text does not hide destructive warnings, provider provenance, score, or primary actions.
+- Mock warnings remain high contrast in every artifact screen.
+
+## Reset QA
+
+**Reset local app state** must retire realtime/API work, best-effort unregister the current push token, clear this device's session/profile/game/navigation/onboarding state, and return to first launch without deleting backend data.
+
+**Reset backend local data** must require an authenticated session, exact destructive confirmation, local/test `ENV`, and `DEBUG=true`. It clears the current database and process-local notification/debug state, then returns the device to onboarding. It must return `404` in staging/production.
+
+## Exit criteria
+
+Before distributing an external beta candidate:
+
+- final candidate SHA and remote branch are recorded;
+- CI and exact local validation are green;
+- target-database migration is verified on a disposable copy or staging database;
+- at least one physical iOS two-player pass is recorded;
+- Android is either passed or explicitly removed from the candidate scope;
+- enabled live AI and notification providers are tested with their real credentials;
+- cold/warm link behavior is tested for the links actually distributed;
+- no raw secret/session/invite/device-token values appear in logs, diffs, screenshots, or reports; and
+- every remaining limitation is listed in release readiness with an owner/decision.

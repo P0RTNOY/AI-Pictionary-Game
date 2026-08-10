@@ -1,86 +1,59 @@
 # AI Pictionary Game
 
-Mobile-first async multiplayer AI Pictionary.
+AI Pictionary is a two-player Expo/FastAPI beta. One player writes a prompt, three AI artists produce SVG clues, the other player guesses, and the game records scoring and changes turns.
 
-Two local users can create a game, take turns writing weird prompts, generate three SVG clue drawings, guess the original prompt, receive a semantic score, and pass the turn back. The backend now persists state in SQLite, so games survive backend restarts.
+The repository contains:
 
-## Structure
+- `backend/` — FastAPI, SQLAlchemy, Alembic, AI/notification providers, and pytest coverage.
+- `mobile/` — Expo SDK 54, React Native, TypeScript, authenticated API clients, and lifecycle checks.
+- `docs/` — beta testing, release-candidate QA, and release evidence.
 
-- `backend/` - FastAPI, SQLite persistence, game services, AI providers, sanitizer, tests.
-- `mobile/` - Expo React Native app with API clients, screens, components, and game types.
+## Backend: first local run
 
-## Backend Setup
+From a fresh checkout:
 
 ```bash
 cd backend
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
-cp .env.example .env
-```
-
-For free local development, keep:
-
-```bash
-AI_PROVIDER=mock
-```
-
-Run:
-
-```bash
+python -m pip install -r requirements.txt
+test -e .env || cp .env.example .env
+alembic upgrade head
 uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
-SQLite is created automatically at `backend/ai_pictionary.db` when `AUTO_CREATE_TABLES=true`.
+The example configuration uses local SQLite, deterministic mock AI, and mock notifications. `AUTO_CREATE_TABLES=true` also keeps the local SQLite schema compatible at startup, but deployable environments must set it to `false` and run Alembic explicitly.
 
-Health:
+Public checks:
 
 ```bash
 curl http://localhost:8000/health
 curl http://localhost:8000/ai/status
 ```
 
-## Database And Migrations
+Do not commit `.env` or credential values.
 
-Local SQLite default:
+## Anonymous beta sessions
 
-```bash
-DATABASE_URL=sqlite:///./ai_pictionary.db
-AUTO_CREATE_TABLES=true
-```
+`POST /users` creates a local profile and returns an opaque bearer token once. The backend stores only its hash; the mobile app stores the token with the local user ID and sends it on private requests.
 
-Alembic is available for production-style schema management:
+Profiles created before session tokens were introduced cannot be recovered insecurely. If the app finds a stored user ID without a token, or the backend confirms that the token is invalid with `401`, it clears that local session and returns to onboarding. A network or server failure keeps the session and shows a retry path.
 
-```bash
-cd backend
-source .venv/bin/activate
-alembic upgrade head
-alembic downgrade -1
-alembic current
-```
+## AI providers and provenance
 
-Reset local SQLite:
+`AI_PROVIDER` accepts exactly `mock`, `openrouter`, or `local`. Unknown values fail configuration instead of falling back silently.
+
+### Mock (default)
 
 ```bash
-rm -f ai_pictionary.db ai_pictionary.db-*
-alembic upgrade head
+AI_PROVIDER=mock
 ```
 
-Postgres example:
+Mock mode is deterministic and free. It is suitable for lifecycle testing, not for evaluating drawing quality. Every generated SVG records `provider_used`, and mobile waiting/guess/result screens visibly mark any mock artifact as testing output.
 
-```bash
-docker compose --profile postgres up -d postgres
-export DATABASE_URL=postgresql+psycopg://ai_pictionary:ai_pictionary_dev@localhost:5432/ai_pictionary
-cd backend
-alembic upgrade head
-uvicorn app.main:app --host 0.0.0.0 --port 8000
-```
+### OpenRouter
 
-For production, set `AUTO_CREATE_TABLES=false` and run migrations during deploy.
-
-## OpenRouter Mode
-
-Set:
+Set these in `backend/.env` or the deployment secret store:
 
 ```bash
 AI_PROVIDER=openrouter
@@ -93,11 +66,14 @@ OPENROUTER_MODEL_LITERAL_EFFORT=high
 OPENROUTER_JUDGE_MODEL=openai/gpt-5-nano
 ```
 
-Do not commit `.env`.
+Restart the backend, open **Beta debug**, and verify the separate rows:
 
-## Local Model Mode
+- **AI provider** must say `openrouter`.
+- **Judge model** reports the configured OpenRouter judge model.
 
-`AI_PROVIDER=local` is a backend-to-local-server placeholder. It expects a local OpenAI-compatible chat server:
+Create a new round after changing providers. Persisted artifacts keep the provider that actually produced them. If `OPENROUTER_JUDGE_MODEL` is empty, scoring falls back to local similarity. Provider construction, timeout, malformed response, and oversized-response failures leave the round in a recoverable failed state without exposing the prompt or raw provider error.
+
+### Local OpenAI-compatible server
 
 ```bash
 AI_PROVIDER=local
@@ -105,70 +81,150 @@ LOCAL_MODEL_BASE_URL=http://localhost:1234/v1
 LOCAL_MODEL_NAME=your-local-model
 ```
 
-This does not run heavy inference inside the mobile app.
+The local provider calls `{LOCAL_MODEL_BASE_URL}/chat/completions`; it does not run inference inside the mobile app. Local-provider scoring uses local similarity. Confirm **AI provider** says `local`; the separate **Judge model** row is configuration information and does not change that behavior.
 
-## Backend Tests
+## Database and migrations
+
+Local defaults:
+
+```bash
+DATABASE_URL=sqlite:///./ai_pictionary.db
+AUTO_CREATE_TABLES=true
+```
+
+Normal schema commands, run from `backend/` with the virtual environment active:
+
+```bash
+alembic heads
+alembic upgrade head
+alembic current
+```
+
+The current chain includes provider provenance, anonymous sessions and WebSocket tickets, transition constraints, device-token ownership, and device-token registration generations. Run `alembic downgrade -1` only against a disposable QA database; it is not a normal deployment step.
+
+PostgreSQL-shaped local setup:
+
+```bash
+docker compose --profile postgres up -d postgres
+export DATABASE_URL=postgresql+psycopg://ai_pictionary:ai_pictionary_dev@localhost:5432/ai_pictionary
+cd backend
+alembic upgrade head
+uvicorn app.main:app --host 0.0.0.0 --port 8000
+```
+
+The command above uses the compose development credentials only. Use a secret store and a different password outside local development.
+
+## Safe local reset
+
+The preferred reset is **Beta debug → Reset backend local data**. The endpoint is available only when both conditions are true:
+
+- backend `ENV` is `local`, `dev`, `development`, or `test`; and
+- backend `DEBUG=true`.
+
+It also requires the current bearer session and an exact confirmation payload. It deletes all rows from the current local/test database in dependency order, clears the process-local notification outbox and invite limiter, and returns the app to onboarding because the current session was deleted. Staging and production receive `404` even if `DEBUG` is accidentally enabled.
+
+**Reset local app state** is different: it best-effort unregisters that installation's push token, retires active work, and clears this device's profile/session/onboarding state. It does not delete backend games or other users.
+
+## Backend validation
 
 ```bash
 cd backend
 source .venv/bin/activate
-pytest -q
+python -m pytest -q
 ```
 
-Tests cover users, games, turn validation, generation success, partial generation failure, generation retry, game stats, scoring, sanitizer safety, event creation, invites, debug endpoints, Alembic bootstrap, prompt safety, and Expo notification provider behavior.
+For the disposable migration round trip used by CI, set `DATABASE_URL` to a new SQLite file, then run:
 
-## Mobile Setup
+```bash
+alembic heads
+alembic upgrade head
+alembic current
+alembic downgrade -1
+alembic upgrade head
+alembic current
+```
+
+## Mobile: first local run
 
 ```bash
 cd mobile
-npm install
+npm ci
+test -e .env.local || cp .env.example .env.local
 EXPO_PUBLIC_API_URL=http://localhost:8000 npm start
 ```
 
-For a physical phone, use your Mac LAN IP:
+For a physical phone on the same LAN, use the computer's LAN address instead of loopback:
 
 ```bash
-EXPO_PUBLIC_API_URL=http://192.168.1.114:8000 npm start -- --host lan
+EXPO_PUBLIC_API_URL=http://YOUR_MAC_IP:8000 npm start -- --host lan
 ```
 
-The beta flow now starts with a short onboarding sequence, then asks for a display name/avatar. Use **Create invite** or **Join** on Home to create/copy an invite code/link or join another player by code.
+Browser preview:
 
-For a repeatable physical-phone test plan, see [docs/BETA_TESTING.md](/Users/portnoy/Documents/MobileGame/docs/BETA_TESTING.md).
-For release-candidate build QA, see [docs/RELEASE_CANDIDATE_QA.md](/Users/portnoy/Documents/MobileGame/docs/RELEASE_CANDIDATE_QA.md).
+```bash
+EXPO_PUBLIC_API_URL=http://localhost:8000 npm run web
+```
 
-Mobile beta polish included:
+The local loopback default is intentionally limited to non-release environments. Staging and production Expo config fails closed if `EXPO_PUBLIC_API_URL` is missing, malformed, non-HTTP(S), loopback, or unspecified. Configure it as a plaintext public EAS environment variable for the matching `preview` or `production` environment; it is not a secret.
 
-- Home sections for Your Turn, Waiting, and Completed.
-- Opponent display name/avatar, status pill, last activity text, and new-turn badge.
-- Prompt builder cards for character/object, action, setting, and twist.
-- Per-artist waiting status and retry if every artist fails.
-- Guess screen that keeps the original prompt hidden, warns before extra clues, and confirms very short guesses.
-- Result screen with score label, clue penalty, component scores, matched/missed parts, game stats, and copyable result text.
-- Pull-to-refresh on Home, background refresh when the app returns active, WebSocket reconnect with polling fallback, and a small Beta debug screen.
-- Haptics-ready feedback through `expo-haptics`; failures are ignored on unsupported devices/simulators.
-- Native dev deep links in the form `aipictionary://invite/{code}` open the Join Invite screen and prefill the code.
+`EXPO_PUBLIC_API_TIMEOUT_MS` optionally sets the API deadline from 1,000 to 60,000 ms; invalid values use the 15,000 ms default.
 
-Push notifications:
+## Mobile validation
 
-- The app requests notification permission after a local user exists.
-- If granted, it registers the Expo push token with `POST /device-tokens`.
-- If denied or unavailable, gameplay continues normally.
-- Notification taps try to open the related game when `game_id` is present in notification data.
+Run from `mobile/`:
 
-SVG generation modes:
+```bash
+npm run test:task3-security
+npm run test:task4-lifecycle
+npm run test:task5-lifecycle
+node scripts/test-app-config.js
+npm run typecheck
+npx expo-doctor
+EXPO_NO_DOTENV=1 EXPO_PUBLIC_APP_ENV=development EXPO_PUBLIC_BUILD_PROFILE=development EXPO_PUBLIC_API_URL=http://127.0.0.1:8000 npx expo config --type public --json
+```
 
-- `AI_PROVIDER=mock` is for fast Expo/local testing. It now renders prompt-derived labels and simple scene structure, but it is still not real art.
-- `AI_PROVIDER=openrouter` or `AI_PROVIDER=local` should be used when judging whether clues visually match the submitted prompt.
-- Beta debug shows the active AI provider so testers know whether they are seeing mock or real generation.
+CI runs the same security/lifecycle, type, Doctor, config, backend test, and migration checks without provider or push credentials. See [the CI workflow](.github/workflows/ci.yml).
 
-Mobile environment files:
+## API and authorization summary
 
-- Copy `mobile/.env.example` to `mobile/.env.local` for local runs.
-- Set `EXPO_PUBLIC_API_URL` to your LAN/staging/production backend.
-- Set `EXPO_PUBLIC_APP_ENV` to `local`, `development`, `staging`, or `production`.
-- Set `EXPO_PUBLIC_BUILD_PROFILE` to `local`, `development`, `preview`, or `production`.
+Public endpoints:
 
-Expo/EAS:
+- `GET /health`
+- `GET /ai/status`
+- `POST /users`
+- `POST /invites/preview` (capability lookup, rate-limited)
+
+Private HTTP endpoints require `Authorization: Bearer <session token>`. The server derives the actor from that token and enforces profile ownership, game participation, and turn/role checks. Main private routes include profile/game reads, invite creation/join, round creation/read/retry/guess, event polling, WebSocket-ticket issuance, and device-token register/unregister.
+
+Realtime uses a short-lived, game-scoped, single-use ticket:
+
+```text
+POST /games/{game_id}/websocket-ticket
+WS /ws/games/{game_id}?ticket=...&after_id=...
+```
+
+The mobile app deduplicates event IDs, bounds reconnect backoff, and uses authenticated polling as fallback. It never puts the long-lived bearer token in the WebSocket URL.
+
+Legacy direct `POST /games`, `POST /rounds`, and capability-in-path invite routes exist only in authenticated local debug mode. Debug health/data/reset/notification routes also require authenticated local debug mode and are unavailable in deployable environments.
+
+## Push notifications
+
+Local development defaults to:
+
+```bash
+NOTIFICATION_PROVIDER=mock
+```
+
+Expo delivery requires secrets outside git:
+
+```bash
+NOTIFICATION_PROVIDER=expo
+EXPO_ACCESS_TOKEN=...
+```
+
+Device-token registration and unregister are authenticated. Active token ownership, per-user registrations, fanout, and the diagnostic outbox are bounded. Network delivery occurs after game-state commits; failures are stored with stable redacted messages. Beta debug copies only a short irreversible token fingerprint, never the raw token.
+
+## EAS builds and deployment
 
 ```bash
 npm install -g eas-cli
@@ -179,146 +235,26 @@ eas build --profile development --platform android
 EXPO_PUBLIC_API_URL=http://YOUR_MAC_IP:8000 npx expo start --dev-client --host lan
 ```
 
-Expo Go is still useful for quick local UI checks. Use an EAS development build for real push-notification and native deep-link testing.
+Remote EAS builds use Continuous Native Generation because `.easignore` excludes the committed local native directories. Preview and production builds need their non-loopback `EXPO_PUBLIC_API_URL` configured before `eas build`.
 
-## Main API
-
-- `POST /users`
-- `GET /users/{user_id}`
-- `POST /games`
-- `GET /users/{user_id}/games`
-- `GET /games/{game_id}`
-- `GET /games/{game_id}/stats?user_id=...`
-- `POST /invites`
-- `GET /invites/{code}`
-- `POST /invites/{code}/join`
-- `POST /device-tokens`
-- `POST /games/{game_id}/rounds`
-- `GET /rounds/{round_id}`
-- `POST /rounds/{round_id}/retry-generation`
-- `POST /rounds/{round_id}/guess`
-- `GET /games/{game_id}/events?after_id=...`
-- `WS /ws/games/{game_id}`
-- `GET /ai/status`
-- `GET /debug/health/full` when `DEBUG=true`
-- `GET /debug/events` when `DEBUG=true`
-- `GET /debug/games` when `DEBUG=true`
-- `GET /debug/notification-outbox` when `DEBUG=true`
-- `POST /debug/send-test-notification` when `DEBUG=true`
-
-Legacy `POST /rounds` remains for compatibility.
-
-## Realtime
-
-The backend exposes:
-
-```text
-WS /ws/games/{game_id}?user_id=...&after_id=...
-```
-
-Messages are wrapped as:
-
-```json
-{"type": "event", "event": {"id": 1, "event_type": "round.ready_to_guess"}}
-```
-
-The mobile app deduplicates by event ID, reconnects on disconnect, and falls back to polling `GET /games/{game_id}/events?after_id=...`.
-
-## Push Notifications
-
-`POST /device-tokens` stores Expo-style device tokens. Configure:
+Deployable backend shape:
 
 ```bash
-NOTIFICATION_PROVIDER=mock
-# or
+ENV=staging
+DEBUG=false
+AUTO_CREATE_TABLES=false
+DATABASE_URL=postgresql+psycopg://...
+CORS_ALLOW_ORIGINS=https://your-preview-origin.example
+AI_PROVIDER=openrouter
+OPENROUTER_API_KEY=...
 NOTIFICATION_PROVIDER=expo
 EXPO_ACCESS_TOKEN=...
 ```
 
-The backend records notification attempts/results in `notification_attempts`. Notification sending is non-blocking for game actions; failures are stored and logged.
+Run `alembic upgrade head` before starting the deployed backend. SQLite is appropriate for local/single-process testing; PostgreSQL remains the intended deployable database target.
 
-Notifications are triggered when:
+## QA and release evidence
 
-- opponent creates a prompt
-- round is ready to guess
-- opponent guessed
-- turn changes
-- invite is accepted
-
-Expo push delivery is implemented in `ExpoPushNotificationProvider`.
-
-## Auth Upgrade Path
-
-Current users are local anonymous profiles. The `users` table includes:
-
-- `display_name`
-- `avatar_emoji`
-- `avatar_color`
-- `auth_provider`
-- `auth_subject`
-
-Recommended production path:
-
-1. Keep `users.id` as the app profile ID.
-2. Add Apple/Google/Supabase/Firebase auth on mobile.
-3. Store provider identity in `auth_provider` and `auth_subject`.
-4. Use backend auth middleware to map verified JWT claims to the app user.
-5. Keep game/round services using app user IDs.
-
-## Deployment Notes
-
-Recommended beta backend targets:
-
-- Render, Fly.io, Railway, or a small VPS Docker deployment.
-- Use `AI_PROVIDER=openrouter` for real SVG generation.
-- Keep secrets in platform env vars, not `.env` in git.
-- Set `CORS_ALLOW_ORIGINS` to your deployed app/dev origins instead of `*`.
-
-SQLite is fine for local beta testing, but not ideal for multi-instance production. Migration plan:
-
-1. Move `DATABASE_URL` to Postgres.
-2. Run Alembic migrations.
-3. Keep the service layer unchanged.
-4. Move file/blob storage for generated SVGs to object storage if needed.
-
-Docker:
-
-```bash
-docker compose up --build backend
-docker compose --profile postgres up --build
-```
-
-Production checklist:
-
-- `ENV=production`
-- `DEBUG=false`
-- `AUTO_CREATE_TABLES=false`
-- `DATABASE_URL=postgresql+psycopg://...`
-- `CORS_ALLOW_ORIGINS=https://your-domain.example`
-- `AI_PROVIDER=openrouter`
-- `OPENROUTER_API_KEY=...`
-- `NOTIFICATION_PROVIDER=expo`
-- `EXPO_ACCESS_TOKEN=...`
-- Run `alembic upgrade head` before starting the app.
-
-Staging should use the same shape with `ENV=staging`, `DEBUG=false`, `AUTO_CREATE_TABLES=false`, explicit `CORS_ALLOW_ORIGINS`, and a staging `DATABASE_URL`.
-
-Mobile builds:
-
-- Expo Go works for local development.
-- For beta distribution, create an Expo development build or EAS build.
-- Configure Expo push credentials before enabling real push delivery.
-- `mobile/eas.json` includes `development`, `preview`, and `production` profiles.
-
-Current beta limitations:
-
-- Invite links use `aipictionary://invite/CODE` in dev. Production universal links/app links should later use `https://your-domain.com/invite/CODE`.
-- Realtime still uses database-backed event polling behind the WebSocket loop. It is reliable enough for local beta, but a production deployment should move to a dedicated pub/sub or Postgres notification channel.
-- SQLite is best for single-instance local/dev beta. Use Postgres before running multiple backend instances.
-- Push notifications are structurally ready and mockable locally; production delivery requires Expo credentials, EAS/project configuration, and device testing.
-
-## Safety
-
-Generated SVG is treated as untrusted input. The backend parses SVG with `defusedxml`, strips scripts, event handlers, external URLs, remote references, and disallowed tags before storing/rendering.
-
-Challenge prompts are normalized and checked by a content-safety placeholder before generation. The current implementation blocks obvious markup/script payloads and enforces prompt length; replace `backend/app/safety.py` with stronger moderation before public launch.
+- [Beta testing guide](docs/BETA_TESTING.md)
+- [Release-candidate QA](docs/RELEASE_CANDIDATE_QA.md)
+- [Release readiness evidence](docs/RELEASE_READINESS.md)

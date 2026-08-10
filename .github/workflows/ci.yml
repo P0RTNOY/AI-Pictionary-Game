@@ -1,0 +1,87 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - "codex/**"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    name: Backend tests and migrations
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: backend
+    env:
+      ENV: test
+      DEBUG: "true"
+      AI_PROVIDER: mock
+      NOTIFICATION_PROVIDER: mock
+      PYTHON_DOTENV_DISABLED: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+      - name: Install backend dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Run backend test suite
+        run: python -m pytest -q
+      - name: Validate Alembic chain on a disposable database
+        env:
+          AUTO_CREATE_TABLES: "false"
+          DATABASE_URL: sqlite:///${{ runner.temp }}/ai-pictionary-ci.db
+        run: |
+          alembic heads
+          alembic upgrade head
+          alembic current
+          alembic downgrade -1
+          alembic upgrade head
+          alembic current
+
+  mobile:
+    name: Mobile static and lifecycle checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: mobile
+    env:
+      CI: "1"
+      EXPO_NO_DOTENV: "1"
+      EXPO_PUBLIC_APP_ENV: development
+      EXPO_PUBLIC_BUILD_PROFILE: development
+      EXPO_PUBLIC_API_URL: http://127.0.0.1:8000
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: mobile/package-lock.json
+      - name: Install mobile dependencies
+        run: npm ci
+      - name: Run security and lifecycle checks
+        run: |
+          npm run test:task3-security
+          npm run test:task4-lifecycle
+          npm run test:task5-lifecycle
+          node scripts/test-app-config.js
+      - name: Type-check mobile app
+        run: npm run typecheck
+      - name: Run Expo Doctor
+        run: npx expo-doctor
+      - name: Validate public Expo config
+        run: npx expo config --type public --json > "${RUNNER_TEMP}/expo-public-config.json"
