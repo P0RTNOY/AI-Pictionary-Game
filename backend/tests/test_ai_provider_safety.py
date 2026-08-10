@@ -109,6 +109,60 @@ async def test_provider_constructor_failure_finalizes_round_for_retry(db_session
 
 
 @pytest.mark.asyncio
+async def test_provider_constructor_failure_preserves_partial_retry_success(db_session, monkeypatch):
+    player, game, round_record = create_test_round(db_session)
+    monkeypatch.setattr(services, "get_ai_provider", lambda: SuccessfulProvider("first-provider"))
+    await services.generate_round_svgs(round_record.id)
+
+    stored = services.load_round_orm(db_session, round_record.id)
+    completed = stored.generated_svgs[0]
+    completed_snapshot = {
+        "id": completed.id,
+        "provider_used": completed.provider_used,
+        "svg_text": completed.svg_text,
+        "attempts": completed.attempts,
+    }
+    retryable_ids = {svg.id for svg in stored.generated_svgs[1:]}
+    for svg in stored.generated_svgs[1:]:
+        svg.status = SvgStatus.failed.value
+        svg.svg_text = None
+        svg.error_message = "old public error"
+    db_session.commit()
+    services.prepare_generation_retry(db_session, round_record.id, player.id)
+
+    def fail_to_construct():
+        raise RuntimeError("credential secret-value was rejected")
+
+    monkeypatch.setattr(services, "get_ai_provider", fail_to_construct)
+    await services.generate_round_svgs(round_record.id)
+
+    db_session.expire_all()
+    generated = services.get_round(db_session, round_record.id)
+    completed_after = next(svg for svg in generated.generated_svgs if svg.id == completed_snapshot["id"])
+    retryable_after = [svg for svg in generated.generated_svgs if svg.id in retryable_ids]
+    assert generated.status == RoundStatus.ready_to_guess
+    assert completed_after.status == SvgStatus.done
+    assert completed_after.provider_used == completed_snapshot["provider_used"] == "first-provider"
+    assert completed_after.svg_text == completed_snapshot["svg_text"]
+    assert completed_after.attempts == completed_snapshot["attempts"] == 1
+    assert all(svg.status == SvgStatus.failed for svg in retryable_after)
+    assert all(svg.attempts == 2 for svg in retryable_after)
+    assert all(svg.provider_used is None for svg in retryable_after)
+    assert {svg.error_message for svg in retryable_after} == {PUBLIC_GENERATION_ERROR_MESSAGE}
+
+    terminal_events = [
+        event
+        for event in services.list_events(db_session, game.id)
+        if event.event_type in {"round.ready_to_guess", "round.failed"}
+    ]
+    assert terminal_events[-1].event_type == "round.ready_to_guess"
+    assert terminal_events[-1].payload["available_svgs"] == 1
+    assert terminal_events[-1].payload["code"] == PUBLIC_GENERATION_ERROR_CODE
+    assert terminal_events[-1].payload["message"] == PUBLIC_GENERATION_ERROR_MESSAGE
+    assert "secret-value" not in json.dumps(terminal_events[-1].payload)
+
+
+@pytest.mark.asyncio
 async def test_provider_failures_redact_prompts_and_exception_details(db_session, monkeypatch, caplog):
     prompt = "a private narwhal password dancing in a vault"
 

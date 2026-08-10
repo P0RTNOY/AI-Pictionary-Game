@@ -430,14 +430,15 @@ def finalize_provider_initialization_failure(db: Session, round_record: RoundORM
                 "message": PUBLIC_GENERATION_ERROR_MESSAGE,
             },
         )
-    round_record.status = RoundStatus.failed.value
+    done_count = sum(1 for svg in round_record.generated_svgs if svg.status == SvgStatus.done.value)
+    round_record.status = RoundStatus.ready_to_guess.value if done_count else RoundStatus.failed.value
     add_event(
         db,
         round_record.game_id,
-        "round.failed",
+        "round.ready_to_guess" if done_count else "round.failed",
         {
             "round_id": round_record.id,
-            "available_svgs": 0,
+            "available_svgs": done_count,
             "code": PUBLIC_GENERATION_ERROR_CODE,
             "message": PUBLIC_GENERATION_ERROR_MESSAGE,
         },
