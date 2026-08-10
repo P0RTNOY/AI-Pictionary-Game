@@ -763,6 +763,53 @@ def get_round_for_user(db: Session, round_id: str, user_id: str) -> Round:
     return to_round_schema(round_record, reveal_prompt=reveal_prompt)
 
 
+def reveal_next_clue(db: Session, round_id: str, user_id: str) -> Round:
+    round_record = load_round_orm(db, round_id)
+    if user_id != round_record.guesser_user_id:
+        raise HTTPException(status_code=403, detail="Only the guesser can reveal clues")
+    if round_record.status != RoundStatus.ready_to_guess.value:
+        raise HTTPException(status_code=409, detail="Round is not ready for clue reveals")
+
+    available_clues = db.scalar(
+        select(func.count(GeneratedSvgORM.id)).where(
+            GeneratedSvgORM.round_id == round_id,
+            GeneratedSvgORM.status == SvgStatus.done.value,
+            GeneratedSvgORM.svg_text.is_not(None),
+            GeneratedSvgORM.svg_text != "",
+        )
+    ) or 0
+    revealed_count = db.execute(
+        update(RoundORM)
+        .where(
+            RoundORM.id == round_id,
+            RoundORM.status == RoundStatus.ready_to_guess.value,
+            RoundORM.clue_reveal_count < available_clues,
+        )
+        .values(
+            clue_reveal_count=RoundORM.clue_reveal_count + 1,
+            updated_at=now(),
+        )
+        .returning(RoundORM.clue_reveal_count)
+    ).scalar_one_or_none()
+    if revealed_count is None:
+        db.rollback()
+        latest = db.get(RoundORM, round_id)
+        if latest is None or latest.status != RoundStatus.ready_to_guess.value:
+            raise HTTPException(status_code=409, detail="Round is no longer accepting clue reveals")
+        raise HTTPException(status_code=409, detail="All available clues are already revealed")
+
+    add_event(
+        db,
+        round_record.game_id,
+        "clue.revealed",
+        {"round_id": round_id, "clue_reveal_count": revealed_count},
+        user_id=user_id,
+    )
+    db.commit()
+    db.expire_all()
+    return get_round_for_user(db, round_id, user_id)
+
+
 def submit_guess(db: Session, round_id: str, guess_text: str, user_id: Optional[str] = None, clue_count_used: int = 1) -> GuessResult:
     round_record = load_round_orm(db, round_id)
     if round_record.status != RoundStatus.ready_to_guess.value:
@@ -777,18 +824,19 @@ def submit_guess(db: Session, round_id: str, guess_text: str, user_id: Optional[
         raise HTTPException(status_code=403, detail="You cannot guess your own prompt")
 
     completed_at = now()
-    transition = db.execute(
+    authoritative_clue_count = db.execute(
         update(RoundORM)
         .where(RoundORM.id == round_id, RoundORM.status == RoundStatus.ready_to_guess.value)
         .values(status=RoundStatus.guessed.value, completed_at=completed_at, updated_at=completed_at)
-    )
-    if transition.rowcount != 1:
+        .returning(RoundORM.clue_reveal_count)
+    ).scalar_one_or_none()
+    if authoritative_clue_count is None:
         db.rollback()
         raise HTTPException(status_code=409, detail="This round has already been guessed")
 
     provider = get_ai_provider()
     judge = provider.score_guess_sync(round_record.original_prompt, guess_text)
-    penalty = max(0, clue_count_used - 1) * 8
+    penalty = max(0, authoritative_clue_count - 1) * 8
     score = max(0, int(judge["score"]) - penalty)
     judge["score"] = score
 
@@ -800,7 +848,7 @@ def submit_guess(db: Session, round_id: str, guess_text: str, user_id: Optional[
         score=score,
         judge_result_json=json.dumps(judge),
         component_scores_json=json.dumps(judge.get("component_scores", {})),
-        clue_count_used=clue_count_used,
+        clue_count_used=authoritative_clue_count,
     )
     round_record.status = RoundStatus.guessed.value
     round_record.completed_at = completed_at

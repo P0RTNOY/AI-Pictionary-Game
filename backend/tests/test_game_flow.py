@@ -85,9 +85,14 @@ def test_duplicate_guess_and_clue_penalty_are_enforced(db_session):
     )
     stored_round = services.load_round_orm(db_session, round_record.id)
     stored_round.status = RoundStatus.ready_to_guess.value
+    for svg in stored_round.generated_svgs:
+        svg.status = SvgStatus.done.value
+        svg.svg_text = "<svg><circle cx='1' cy='1' r='1'/></svg>"
     db_session.commit()
 
-    one_clue_score = services.submit_guess(db_session, round_record.id, "cat eating pizza moon", user_id=player_2.id, clue_count_used=3)
+    services.reveal_next_clue(db_session, round_record.id, player_2.id)
+    services.reveal_next_clue(db_session, round_record.id, player_2.id)
+    one_clue_score = services.submit_guess(db_session, round_record.id, "cat eating pizza moon", user_id=player_2.id, clue_count_used=1)
     assert one_clue_score.clue_penalty == 16
 
     with pytest.raises(HTTPException) as duplicate:

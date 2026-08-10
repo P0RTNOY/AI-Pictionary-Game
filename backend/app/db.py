@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Generator
 
-from sqlalchemy import create_engine, inspect, text
+from sqlalchemy import create_engine, event, inspect, text
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 from app.config import ACTIVE_DEVICE_TOKEN_LIMIT, AUTO_CREATE_TABLES, DATABASE_URL
@@ -17,13 +17,24 @@ class Base(DeclarativeBase):
     pass
 
 
+if engine.url.get_backend_name() == "sqlite":
+    @event.listens_for(engine, "connect")
+    def _enable_sqlite_foreign_keys(dbapi_connection, _connection_record) -> None:
+        cursor = dbapi_connection.cursor()
+        try:
+            cursor.execute("PRAGMA foreign_keys=ON")
+        finally:
+            cursor.close()
+
+
 def init_db() -> None:
     from app import orm_models  # noqa: F401
 
-    if AUTO_CREATE_TABLES and DATABASE_URL.startswith("sqlite"):
+    if not AUTO_CREATE_TABLES:
+        return
+    if DATABASE_URL.startswith("sqlite"):
         _reconcile_sqlite_active_device_tokens()
-    if AUTO_CREATE_TABLES:
-        Base.metadata.create_all(bind=engine)
+    Base.metadata.create_all(bind=engine)
     if DATABASE_URL.startswith("sqlite"):
         _apply_sqlite_light_migrations()
 

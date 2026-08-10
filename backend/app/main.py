@@ -171,25 +171,25 @@ def ai_status() -> dict:
     return get_ai_status()
 
 
-@app.get("/debug/health/full")
+@app.get("/debug/health/full", dependencies=[Depends(require_local_debug)])
 def debug_health_full(actor: UserORM = Depends(current_user), db: Session = Depends(get_db)) -> dict:
     require_debug()
     return {"status": "ok", "env": ENV, "ai": get_ai_status(), "database": "ok"}
 
 
-@app.get("/debug/events")
+@app.get("/debug/events", dependencies=[Depends(require_local_debug)])
 def debug_events(limit: int = 100, actor: UserORM = Depends(current_user), db: Session = Depends(get_db)) -> list[GameEvent]:
     require_debug()
     return services.list_events_for_user(db, actor.id, limit=limit)
 
 
-@app.get("/debug/games")
+@app.get("/debug/games", dependencies=[Depends(require_local_debug)])
 def debug_games(limit: int = 100, actor: UserORM = Depends(current_user), db: Session = Depends(get_db)) -> list[Game]:
     require_debug()
     return services.list_games_for_user(db, actor.id)[:limit]
 
 
-@app.get("/debug/notification-outbox")
+@app.get("/debug/notification-outbox", dependencies=[Depends(require_local_debug)])
 def debug_notification_outbox(limit: int = 100, actor: UserORM = Depends(current_user), db: Session = Depends(get_db)) -> dict:
     require_debug()
     from app.notifications import notification_outbox_snapshot
@@ -204,7 +204,11 @@ def debug_notification_outbox(limit: int = 100, actor: UserORM = Depends(current
     }
 
 
-@app.post("/debug/send-test-notification", response_model=TestNotificationResponse)
+@app.post(
+    "/debug/send-test-notification",
+    response_model=TestNotificationResponse,
+    dependencies=[Depends(require_local_debug)],
+)
 def debug_send_test_notification(payload: TestNotificationRequest, actor: UserORM = Depends(current_user), db: Session = Depends(get_db)) -> TestNotificationResponse:
     require_debug()
     services.assert_actor_matches(payload.user_id, actor.id)
@@ -451,8 +455,16 @@ async def guess_round(
         round_id,
         payload.guess_text,
         user_id=actor.id,
-        clue_count_used=payload.clue_count_used,
     )
+
+
+@app.post("/rounds/{round_id}/reveal-clue", response_model=Round)
+def reveal_round_clue(
+    round_id: str,
+    actor: UserORM = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> Round:
+    return services.reveal_next_clue(db, round_id, actor.id)
 
 
 @app.websocket("/ws/games/{game_id}")

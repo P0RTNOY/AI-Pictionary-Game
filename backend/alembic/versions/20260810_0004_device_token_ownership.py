@@ -8,9 +8,6 @@ Create Date: 2026-08-10
 from alembic import op
 import sqlalchemy as sa
 
-from app.config import ACTIVE_DEVICE_TOKEN_LIMIT
-
-
 revision = "20260810_0004"
 down_revision = "20260810_0003"
 branch_labels = None
@@ -18,6 +15,9 @@ depends_on = None
 
 
 ACTIVE_TOKEN_PREDICATE = "status = 'active'"
+# Migration revisions are immutable historical programs. This value matches
+# the application default at the time this revision was authored.
+ACTIVE_DEVICE_TOKEN_LIMIT = 3
 
 
 def upgrade() -> None:

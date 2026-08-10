@@ -27,16 +27,17 @@ def parse_positive_int(name: str, default: int) -> int:
     return value
 
 
-ENV = os.getenv("ENV", "development").lower()
-DEBUG = parse_bool(os.getenv("DEBUG"), default=is_local_env(ENV))
+ENV = os.getenv("ENV", "production").lower()
+DEBUG = is_local_env(ENV) and parse_bool(os.getenv("DEBUG"), default=True)
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./ai_pictionary.db")
-AUTO_CREATE_TABLES = parse_bool(os.getenv("AUTO_CREATE_TABLES"), default=is_local_env(ENV))
+AUTO_CREATE_TABLES = is_local_env(ENV) and parse_bool(os.getenv("AUTO_CREATE_TABLES"), default=True)
+CORS_DEFAULT = "http://localhost:8081,http://127.0.0.1:8081" if is_local_env(ENV) else ""
 CORS_ALLOW_ORIGINS = [
     origin.strip()
-    for origin in os.getenv("CORS_ALLOW_ORIGINS", "http://localhost:8081,http://127.0.0.1:8081").split(",")
+    for origin in os.getenv("CORS_ALLOW_ORIGINS", CORS_DEFAULT).split(",")
     if origin.strip()
 ]
-if is_local_env(ENV) and "*" not in CORS_ALLOW_ORIGINS:
+if DEBUG and "*" not in CORS_ALLOW_ORIGINS:
     CORS_ALLOW_ORIGINS.append("*")
 
 NOTIFICATION_PROVIDER = os.getenv("NOTIFICATION_PROVIDER", "mock").lower()
