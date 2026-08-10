@@ -8,14 +8,16 @@ import sys
 import pytest
 from alembic import command
 from alembic.config import Config
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
-from sqlalchemy import func, select, text
+from sqlalchemy import func, inspect, select, text
 
 from app import notifications, services
 from app.db import SessionLocal, _apply_sqlite_light_migrations
 from app.main import app
 from app.models import DeviceTokenRegister, GameCreate, GameRoundCreate, UserCreate
 from app.orm_models import DeviceToken as DeviceTokenORM
+from app.orm_models import DeviceTokenRetirement as DeviceTokenRetirementORM
 from app.orm_models import Game as GameORM
 from app.orm_models import NotificationAttempt as NotificationAttemptORM
 from app.orm_models import User as UserORM
@@ -105,7 +107,7 @@ def test_destructive_reset_requires_debug_auth_confirmation_and_clears_all_state
     assert response.json()["deleted_rows"] > 0
     assert set(response.json()) == {"ok", "deleted_rows"}
     db_session.expire_all()
-    for model in (NotificationAttemptORM, DeviceTokenORM, GameORM, UserORM):
+    for model in (NotificationAttemptORM, DeviceTokenRetirementORM, DeviceTokenORM, GameORM, UserORM):
         assert db_session.scalar(select(func.count()).select_from(model)) == 0
     assert notifications.NOTIFICATION_OUTBOX == []
 
@@ -168,6 +170,77 @@ def test_device_token_has_one_active_owner_limit_and_idempotent_unregister(db_se
     ).unregistered is False
 
 
+def test_registration_generation_prevents_stale_unregister_and_late_register(db_session):
+    owner = services.create_user(db_session, UserCreate(display_name="Rotating token owner"))
+    raw_token = "ExponentPushToken[generation-guarded]"
+    old_registration_id = "registration-old"
+    new_registration_id = "registration-new"
+
+    services.register_device_token(
+        db_session,
+        DeviceTokenRegister(
+            user_id=owner.id,
+            token=raw_token,
+            platform="ios",
+            registration_id=old_registration_id,
+        ),
+    )
+    services.register_device_token(
+        db_session,
+        DeviceTokenRegister(
+            user_id=owner.id,
+            token=raw_token,
+            platform="ios",
+            registration_id=new_registration_id,
+        ),
+    )
+
+    stale = services.unregister_device_token(
+        db_session,
+        owner.id,
+        "expo",
+        raw_token,
+        old_registration_id,
+    )
+    assert stale.unregistered is False
+    active = db_session.scalar(
+        select(DeviceTokenORM).where(
+            DeviceTokenORM.user_id == owner.id,
+            DeviceTokenORM.token == raw_token,
+            DeviceTokenORM.status == "active",
+        )
+    )
+    assert active is not None
+    assert active.registration_id == new_registration_id
+
+    late_registration_id = "registration-late"
+    retired_before_arrival = services.unregister_device_token(
+        db_session,
+        owner.id,
+        "expo",
+        "ExponentPushToken[late-arrival]",
+        late_registration_id,
+    )
+    assert retired_before_arrival.unregistered is False
+    with pytest.raises(HTTPException) as exc_info:
+        services.register_device_token(
+            db_session,
+            DeviceTokenRegister(
+                user_id=owner.id,
+                token="ExponentPushToken[late-arrival]",
+                platform="ios",
+                registration_id=late_registration_id,
+            ),
+        )
+    assert exc_info.value.status_code == 409
+    assert db_session.scalar(
+        select(func.count(DeviceTokenORM.id)).where(
+            DeviceTokenORM.token == "ExponentPushToken[late-arrival]",
+            DeviceTokenORM.status == "active",
+        )
+    ) == 0
+
+
 def test_device_token_http_lifecycle_derives_owner_and_never_returns_raw_token(client):
     first, first_token = onboard(client, "First HTTP token owner")
     second, second_token = onboard(client, "Second HTTP token owner")
@@ -183,12 +256,12 @@ def test_device_token_http_lifecycle_derives_owner_and_never_returns_raw_token(c
     first_registration = client.post(
         "/device-tokens",
         headers=bearer(first_token),
-        json={"token": raw_token, "platform": "ios"},
+        json={"token": raw_token, "platform": "ios", "registration_id": "http-first-registration"},
     )
     transferred = client.post(
         "/device-tokens",
         headers=bearer(second_token),
-        json={"token": raw_token, "platform": "android"},
+        json={"token": raw_token, "platform": "android", "registration_id": "http-second-registration"},
     )
     assert first_registration.status_code == 201
     assert transferred.status_code == 201
@@ -198,12 +271,12 @@ def test_device_token_http_lifecycle_derives_owner_and_never_returns_raw_token(c
     wrong_owner = client.post(
         "/device-tokens/unregister",
         headers=bearer(first_token),
-        json={"token": raw_token},
+        json={"token": raw_token, "registration_id": "http-first-registration"},
     )
     owner = client.post(
         "/device-tokens/unregister",
         headers=bearer(second_token),
-        json={"token": raw_token},
+        json={"token": raw_token, "registration_id": "http-second-registration"},
     )
     assert wrong_owner.json() == {"unregistered": False}
     assert owner.json() == {"unregistered": True}
@@ -302,6 +375,10 @@ def test_task4_migration_reconciles_duplicate_active_tokens_and_restores_on_down
             text("SELECT id FROM device_tokens WHERE status = 'active' ORDER BY id")
         ).scalars().all()
         assert active == ["new"]
+        assert "registration_id" in {
+            column["name"] for column in inspect(migrated_engine).get_columns("device_tokens")
+        }
+        assert "device_token_retirements" in inspect(migrated_engine).get_table_names()
 
     command.downgrade(config, "20260810_0003")
     with migrated_engine.connect() as connection:
@@ -390,11 +467,15 @@ def test_alembic_adopts_task4_objects_created_by_sqlite_startup_compatibility(
     assert "uq_device_tokens_active_provider_token" in {
         index["name"] for index in before.get_indexes("device_tokens")
     }
+    assert "registration_id" in {
+        column["name"] for column in before.get_columns("device_tokens")
+    }
+    assert "device_token_retirements" in before.get_table_names()
 
     command.upgrade(config, "head")
 
     with compatibility_engine.connect() as connection:
-        assert connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == "20260810_0004"
+        assert connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == "20260810_0005"
 
 
 def test_task4_migration_caps_existing_active_tokens_per_user_and_restores_them(

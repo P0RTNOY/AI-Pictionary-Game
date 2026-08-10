@@ -27,6 +27,7 @@ type PushSession = {
   key: string;
   identity: string;
   credential: string;
+  registrationId: string;
 };
 
 type PushRegistrationResult = Awaited<ReturnType<typeof register>>;
@@ -43,9 +44,17 @@ export function usePushNotifications(
   const [registrationError, setRegistrationError] = useState<string | null>(null);
   const lastRouteKey = useRef<string | null>(null);
   const currentSession = useMemo<PushSession | null>(
-    () => userId && accessToken
-      ? { key: `${userId}:${++nextPushSessionKey}`, identity: userId, credential: accessToken }
-      : null,
+    () => {
+      if (!userId || !accessToken) return null;
+      const sessionNumber = ++nextPushSessionKey;
+      const registrationId = createRegistrationId(sessionNumber);
+      return {
+        key: `${userId}:${sessionNumber}`,
+        identity: userId,
+        credential: accessToken,
+        registrationId,
+      };
+    },
     [accessToken, userId],
   );
   const credentialSession = useRef<PushSession | null>(currentSession);
@@ -61,7 +70,12 @@ export function usePushNotifications(
         if (!token) return;
         try {
           const settlement = await runWithDeadline(
-            (signal) => unregisterDeviceToken(token, session.credential, signal),
+            (signal) => unregisterDeviceToken(
+              token,
+              session.registrationId,
+              session.credential,
+              signal,
+            ),
             PUSH_OPERATION_TIMEOUT_MS,
           );
           if (settlement.status === "timeout") throw new Error("Push unregistration timed out");
@@ -188,13 +202,23 @@ async function register(session: PushSession) {
   );
   const token = expoToken.data;
   const registration = await runWithDeadline(
-    (signal) => registerDeviceToken(token, session.credential, signal),
+    (signal) => registerDeviceToken(
+      token,
+      session.registrationId,
+      session.credential,
+      signal,
+    ),
     PUSH_OPERATION_TIMEOUT_MS,
   );
   if (registration.status === "timeout") {
     try {
       await runWithDeadline(
-        (signal) => unregisterDeviceToken(token, session.credential, signal),
+        (signal) => unregisterDeviceToken(
+          token,
+          session.registrationId,
+          session.credential,
+          signal,
+        ),
         PUSH_OPERATION_TIMEOUT_MS,
       );
     } catch {
@@ -213,4 +237,8 @@ async function requireWithin<Value>(promise: Promise<Value>, timeoutMessage: str
   const settlement = await settleWithin(promise, PUSH_OPERATION_TIMEOUT_MS);
   if (settlement.status === "timeout") throw new Error(timeoutMessage);
   return settlement.value;
+}
+
+function createRegistrationId(sessionNumber: number): string {
+  return `${Date.now().toString(36)}-${sessionNumber.toString(36)}-${Math.random().toString(36).slice(2)}`;
 }

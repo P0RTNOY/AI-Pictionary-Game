@@ -111,6 +111,12 @@ def _apply_sqlite_light_migrations(bind=engine) -> None:
             ]
         )
     if "device_tokens" in inspector.get_table_names():
+        existing = {column["name"] for column in inspector.get_columns("device_tokens")}
+        if "registration_id" not in existing:
+            statements.append("ALTER TABLE device_tokens ADD COLUMN registration_id VARCHAR(64)")
+        statements.append(
+            "CREATE INDEX IF NOT EXISTS ix_device_tokens_registration_id ON device_tokens (registration_id)"
+        )
         statements.extend(_sqlite_device_token_reconciliation_statements())
     with bind.begin() as connection:
         for statement in statements:

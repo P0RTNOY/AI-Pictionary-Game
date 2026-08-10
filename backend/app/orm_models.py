@@ -93,6 +93,17 @@ class DeviceToken(TimestampMixin, Base):
     token: Mapped[str] = mapped_column(String(500), nullable=False)
     platform: Mapped[str] = mapped_column(String(40), default="unknown", nullable=False)
     status: Mapped[str] = mapped_column(String(40), default="active", nullable=False)
+    registration_id: Mapped[Optional[str]] = mapped_column(String(64), index=True)
+
+
+class DeviceTokenRetirement(Base):
+    __tablename__ = "device_token_retirements"
+
+    registration_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[str] = mapped_column(String(64), ForeignKey("users.id"), nullable=False, index=True)
+    provider: Mapped[str] = mapped_column(String(40), nullable=False)
+    token: Mapped[str] = mapped_column(String(500), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
 
 
 class NotificationAttempt(Base):

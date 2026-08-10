@@ -209,11 +209,13 @@ class DeviceTokenRegister(BaseModel):
     token: str = Field(min_length=8, max_length=500)
     provider: Literal["expo"] = "expo"
     platform: str = Field(default="unknown", min_length=2, max_length=40)
+    registration_id: Optional[str] = Field(default=None, min_length=8, max_length=64)
 
 
 class DeviceTokenUnregister(BaseModel):
     token: str = Field(min_length=8, max_length=500)
     provider: Literal["expo"] = "expo"
+    registration_id: Optional[str] = Field(default=None, min_length=8, max_length=64)
 
 
 class DeviceToken(BaseModel):

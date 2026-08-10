@@ -58,6 +58,7 @@ from app.models import (
 )
 from app.notifications import deliver_notifications, get_notification_provider, notify_user
 from app.orm_models import DeviceToken as DeviceTokenORM
+from app.orm_models import DeviceTokenRetirement as DeviceTokenRetirementORM
 from app.orm_models import Game as GameORM
 from app.orm_models import GameEvent as GameEventORM
 from app.orm_models import GameInvite as GameInviteORM
@@ -1032,6 +1033,8 @@ def register_device_token(db: Session, payload: DeviceTokenRegister) -> DeviceTo
         .values(updated_at=UserORM.updated_at)
         .execution_options(synchronize_session=False)
     )
+    if payload.registration_id and db.get(DeviceTokenRetirementORM, payload.registration_id):
+        raise HTTPException(status_code=409, detail="Device token registration was retired")
     matching = (
         db.execute(
             select(DeviceTokenORM).where(
@@ -1061,6 +1064,7 @@ def register_device_token(db: Session, payload: DeviceTokenRegister) -> DeviceTo
             candidate.updated_at = now()
     token.platform = payload.platform
     token.status = "active"
+    token.registration_id = payload.registration_id
     token.updated_at = now()
     db.add(token)
     try:
@@ -1101,8 +1105,30 @@ def unregister_device_token(
     user_id: str,
     provider: str,
     token: str,
+    registration_id: Optional[str] = None,
 ) -> DeviceTokenUnregisterResponse:
     require_user(db, user_id)
+    db.execute(
+        update(UserORM)
+        .where(UserORM.id == user_id)
+        .values(updated_at=UserORM.updated_at)
+        .execution_options(synchronize_session=False)
+    )
+    if registration_id and not db.get(DeviceTokenRetirementORM, registration_id):
+        db.add(
+            DeviceTokenRetirementORM(
+                registration_id=registration_id,
+                user_id=user_id,
+                provider=provider,
+                token=token,
+            )
+        )
+        db.flush()
+    registration_filters = (
+        (DeviceTokenORM.registration_id == registration_id,)
+        if registration_id
+        else ()
+    )
     record = (
         db.execute(
             select(DeviceTokenORM).where(
@@ -1110,12 +1136,15 @@ def unregister_device_token(
                 DeviceTokenORM.provider == provider,
                 DeviceTokenORM.token == token,
                 DeviceTokenORM.status == "active",
+                *registration_filters,
             )
         )
         .scalars()
         .first()
     )
     if not record:
+        if registration_id:
+            db.commit()
         return DeviceTokenUnregisterResponse(unregistered=False)
     record.status = "inactive"
     record.updated_at = now()
@@ -1159,6 +1188,7 @@ def reset_local_data(db: Session) -> LocalDataResetResponse:
         RoundORM,
         GameEventORM,
         GameInviteORM,
+        DeviceTokenRetirementORM,
         DeviceTokenORM,
         GameORM,
         UserORM,

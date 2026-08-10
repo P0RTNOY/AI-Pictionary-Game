@@ -139,6 +139,42 @@ async function run() {
   await boundedCleanup.activate(sessionD);
   await boundedCleanup.retire(sessionD);
 
+  const cleanupGate = deferred();
+  const sequencing = [];
+  const sequenced = createIdentityWorkCoordinator({
+    sessionKey: (session) => session.key,
+    run: async (session) => {
+      sequencing.push(`register:${session.credential}`);
+      return { token: "shared-token" };
+    },
+    cleanup: async (session) => {
+      sequencing.push(`cleanup-start:${session.credential}`);
+      await cleanupGate.promise;
+      sequencing.push(`cleanup-end:${session.credential}`);
+    },
+    accept: () => {},
+    reject: () => {},
+    settle: async (promise) => ({ status: "completed", value: await promise }),
+  });
+  await sequenced.activate(sessionA);
+  const retiringA = sequenced.retire(sessionA);
+  await Promise.resolve();
+  const rotatedA = sequenced.activate(sessionA2);
+  await Promise.resolve();
+  assert.deepEqual(
+    sequencing,
+    ["register:credential-a", "cleanup-start:credential-a"],
+    "rotated registration waits for accepted-session cleanup",
+  );
+  cleanupGate.resolve();
+  await Promise.all([retiringA, rotatedA]);
+  assert.deepEqual(sequencing, [
+    "register:credential-a",
+    "cleanup-start:credential-a",
+    "cleanup-end:credential-a",
+    "register:credential-a-rotated",
+  ]);
+
   const { runWithDeadline } = loadTypeScriptModule("src/promiseDeadline.ts");
   let abortedSignal;
   const aborted = await runWithDeadline((signal) => {

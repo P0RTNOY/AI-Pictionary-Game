@@ -23,6 +23,7 @@ export function createIdentityWorkCoordinator<Session, Result>(
   let currentKey: string | null = null;
   const accepted = new Map<string, { session: Session; result: Result }>();
   const active = new Map<string, { session: Session; work: Promise<Result | null> }>();
+  const retiring = new Map<string, Promise<void>>();
 
   async function cleanup(session: Session, result: Result, key: string): Promise<void> {
     try {
@@ -39,9 +40,10 @@ export function createIdentityWorkCoordinator<Session, Result>(
 
     currentKey = key;
     const workGeneration = ++generation;
-    const blockers = [...active.entries()]
+    const blockers: Promise<unknown>[] = [...active.entries()]
       .filter(([activeKey]) => activeKey !== key)
       .map(([, entry]) => entry.work);
+    blockers.push(...retiring.values());
     const work = (async () => {
       try {
         if (blockers.length > 0) {
@@ -78,25 +80,35 @@ export function createIdentityWorkCoordinator<Session, Result>(
     return work;
   }
 
-  async function retire(session: Session): Promise<void> {
+  function retire(session: Session): Promise<void> {
     const key = callbacks.sessionKey(session);
     if (currentKey === key) {
       currentKey = null;
       generation += 1;
     }
-    const pending = active.get(key);
-    if (pending) {
-      try {
-        await callbacks.settle(pending.work, `retire:${key}`);
-      } catch {
-        // Retirement remains bounded even if the underlying operation rejects.
+    const existing = retiring.get(key);
+    if (existing) return existing;
+
+    const work = (async () => {
+      const pending = active.get(key);
+      if (pending) {
+        try {
+          await callbacks.settle(pending.work, `retire:${key}`);
+        } catch {
+          // Retirement remains bounded even if the underlying operation rejects.
+        }
       }
-    }
-    const retiring = accepted.get(key);
-    if (retiring) {
-      accepted.delete(key);
-      await cleanup(retiring.session, retiring.result, key);
-    }
+      const acceptedResult = accepted.get(key);
+      if (acceptedResult) {
+        accepted.delete(key);
+        await cleanup(acceptedResult.session, acceptedResult.result, key);
+      }
+    })();
+    retiring.set(key, work);
+    void work.finally(() => {
+      if (retiring.get(key) === work) retiring.delete(key);
+    });
+    return work;
   }
 
   return { activate, retire };

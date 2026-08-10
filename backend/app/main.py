@@ -350,7 +350,13 @@ def unregister_device_token(
     actor: UserORM = Depends(current_user),
     db: Session = Depends(get_db),
 ) -> DeviceTokenUnregisterResponse:
-    return services.unregister_device_token(db, actor.id, payload.provider, payload.token)
+    return services.unregister_device_token(
+        db,
+        actor.id,
+        payload.provider,
+        payload.token,
+        payload.registration_id,
+    )
 
 
 @app.post("/games/{game_id}/rounds", response_model=Round, status_code=201)
