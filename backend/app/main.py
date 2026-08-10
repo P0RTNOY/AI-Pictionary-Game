@@ -463,7 +463,13 @@ async def game_events_websocket(websocket: WebSocket, game_id: str) -> None:
             for event in events:
                 last_event_id = event.id
                 await websocket.send_json({"type": "event", "event": event.model_dump()})
-            await asyncio.sleep(0.75)
+            try:
+                message = await asyncio.wait_for(websocket.receive(), timeout=0.75)
+            except asyncio.TimeoutError:
+                continue
+            if message["type"] == "websocket.disconnect":
+                logger.info("websocket.disconnected", extra={"game_id": game_id, "user_id": user_id})
+                return
     except WebSocketDisconnect:
         logger.info("websocket.disconnected", extra={"game_id": game_id, "user_id": user_id})
         return

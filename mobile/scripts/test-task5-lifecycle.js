@@ -219,6 +219,11 @@ async function run() {
   });
   assert.equal(parseAppLink("aipictionary://invite/x"), null);
   assert.equal(parseAppLink("aipictionary://game/not-a-uuid"), null);
+  assert.equal(parseAppLink("aipictionary://invite/abc123/extra"), null);
+  assert.equal(parseAppLink("aipictionary://invite/abc%2Fdef"), null);
+  assert.equal(parseAppLink("aipictionary://game/123e4567-e89b-12d3-a456-426614174000/extra"), null);
+  assert.equal(parseAppLink("aipictionary://game/%E0%A4%A"), null);
+  assert.equal(parseAppLink("ftp://play.example/invite/abcDEF_123-xyz"), null);
   assert.equal(parseAppLink("javascript:alert(1)"), null);
 
   const { artifactProvider, isMockArtifact } = loadTypeScriptModule("src/utils/providerProvenance.ts");
