@@ -2,23 +2,58 @@
   "expo": {
     "name": "AI Pictionary",
     "slug": "ai-pictionary",
+    "description": "Two-player AI sketch duels: write a weird prompt, reveal drawings, and guess for the high score.",
     "version": "0.1.0",
+    "runtimeVersion": {
+      "policy": "appVersion"
+    },
     "orientation": "portrait",
     "userInterfaceStyle": "light",
     "scheme": "aipictionary",
+    "icon": "./assets/app-icon-v2.png",
+    "splash": {
+      "image": "./assets/app-icon-v2.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#FAF7F0"
+    },
     "assetBundlePatterns": [
       "**/*"
     ],
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": true,
+      "bundleIdentifier": "com.portnoy.aipictionary.beta",
+      "infoPlist": {
+        "ITSAppUsesNonExemptEncryption": false
+      }
     },
     "android": {
+      "package": "com.portnoy.aipictionary.beta",
       "adaptiveIcon": {
-        "backgroundColor": "#FAF7F0"
+        "foregroundImage": "./assets/app-icon-v2.png",
+        "backgroundColor": "#F5C84C"
       }
     },
     "plugins": [
-      "expo-asset"
-    ]
+      "expo-asset",
+      "expo-notifications",
+      "expo-font",
+      [
+        "expo-splash-screen",
+        {
+          "backgroundColor": "#FAF7F0",
+          "image": "./assets/app-icon-v2.png",
+          "imageWidth": 160,
+          "resizeMode": "contain"
+        }
+      ]
+    ],
+    "extra": {
+      "appEnv": "local",
+      "buildProfile": "local",
+      "releaseChannel": "local",
+      "eas": {
+        "projectId": "36443fdd-ae57-4284-97bb-8bc2faddb2fd"
+      }
+    }
   }
 }

@@ -1,0 +1,63 @@
+from __future__ import annotations
+
+import os
+
+
+LOCAL_ENVS = {"local", "dev", "development", "test"}
+
+
+def parse_bool(value: str | None, default: bool = False) -> bool:
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def is_local_env(env: str) -> bool:
+    return env.lower() in LOCAL_ENVS
+
+
+def parse_positive_int(name: str, default: int) -> int:
+    raw_value = os.getenv(name)
+    try:
+        value = int(raw_value) if raw_value is not None else default
+    except ValueError as exc:
+        raise ValueError(f"{name} must be a positive integer") from exc
+    if value <= 0:
+        raise ValueError(f"{name} must be a positive integer")
+    return value
+
+
+ENV = os.getenv("ENV", "production").lower()
+DEBUG = is_local_env(ENV) and parse_bool(os.getenv("DEBUG"), default=True)
+DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./ai_pictionary.db")
+AUTO_CREATE_TABLES = is_local_env(ENV) and parse_bool(os.getenv("AUTO_CREATE_TABLES"), default=True)
+CORS_DEFAULT = "http://localhost:8081,http://127.0.0.1:8081" if is_local_env(ENV) else ""
+CORS_ALLOW_ORIGINS = [
+    origin.strip()
+    for origin in os.getenv("CORS_ALLOW_ORIGINS", CORS_DEFAULT).split(",")
+    if origin.strip()
+]
+if DEBUG:
+    if "*" not in CORS_ALLOW_ORIGINS:
+        CORS_ALLOW_ORIGINS.append("*")
+else:
+    CORS_ALLOW_ORIGINS = [origin for origin in CORS_ALLOW_ORIGINS if origin != "*"]
+
+NOTIFICATION_PROVIDER = os.getenv(
+    "NOTIFICATION_PROVIDER",
+    "mock" if is_local_env(ENV) else "expo",
+).lower()
+if NOTIFICATION_PROVIDER not in {"mock", "expo"}:
+    raise ValueError("NOTIFICATION_PROVIDER must be one of: expo, mock")
+EXPO_ACCESS_TOKEN = os.getenv("EXPO_ACCESS_TOKEN", "")
+
+INVITE_ATTEMPT_LIMIT = parse_positive_int("INVITE_ATTEMPT_LIMIT", 20)
+INVITE_ATTEMPT_WINDOW_SECONDS = parse_positive_int("INVITE_ATTEMPT_WINDOW_SECONDS", 60)
+INVITE_RATE_LIMIT_MAX_SOURCES = parse_positive_int("INVITE_RATE_LIMIT_MAX_SOURCES", 10000)
+PER_USER_DAILY_ROUND_LIMIT = parse_positive_int("PER_USER_DAILY_ROUND_LIMIT", 25)
+GLOBAL_DAILY_ROUND_LIMIT = parse_positive_int("GLOBAL_DAILY_ROUND_LIMIT", 200)
+GLOBAL_GENERATING_ROUND_LIMIT = parse_positive_int("GLOBAL_GENERATING_ROUND_LIMIT", 10)
+WEBSOCKET_TICKET_TTL_SECONDS = parse_positive_int("WEBSOCKET_TICKET_TTL_SECONDS", 60)
+ACTIVE_DEVICE_TOKEN_LIMIT = parse_positive_int("ACTIVE_DEVICE_TOKEN_LIMIT", 3)
+NOTIFICATION_FANOUT_LIMIT = parse_positive_int("NOTIFICATION_FANOUT_LIMIT", 3)
+NOTIFICATION_OUTBOX_LIMIT = parse_positive_int("NOTIFICATION_OUTBOX_LIMIT", 100)

@@ -2,8 +2,14 @@ __pycache__/
 .pytest_cache/
 .venv/
 .env
+.env.*
+!.env.example
 node_modules/
 .expo/
+graphify-out/
+.superpowers/sdd/
 dist/
 build/
 *.pyc
+backend/ai_pictionary.db
+backend/ai_pictionary.db-*

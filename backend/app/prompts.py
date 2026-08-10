@@ -1,11 +1,31 @@
-def build_svg_prompt(challenge: str) -> str:
-    return f"""Generate an SVG of {challenge}. Respond with the SVG only, no code blocks.
+def build_svg_prompt(challenge: str, artist_tier: str = "balanced") -> str:
+    if artist_tier == "confusing":
+        artist_instruction = "Confusing Artist: rough, playful, and a little strange, but still clearly related to the exact prompt."
+    elif artist_tier == "literal":
+        artist_instruction = "Literal Artist: very clear, direct, and includes the most important prompt components."
+    else:
+        artist_instruction = "Balanced Artist: reasonably clear and readable, with the main prompt components represented."
 
-Make it a clear, funny, understandable scene for a guessing game.
+    return f"""Create a clear visual SVG scene that represents this exact situation:
+"{challenge}"
+
+{artist_instruction}
+
+Requirements:
+- Include the important characters or objects.
+- Show the main action; do not ignore what the characters are doing.
+- Include the setting and any twist or mood when present.
+- Do not draw a generic abstract icon.
+- Do not include the full prompt as text.
+- Short object labels are allowed only when they help and do not reveal the full answer.
+- Use several meaningful shapes/paths, not only a background and text.
+- Use a 1024x1024 viewBox.
+- Return only valid SVG, no markdown and no code blocks.
+
+Safety:
+Do not include scripts, event handlers, external images, external fonts, or remote URLs.
 Use a 1024x1024 viewBox.
-Do not write the full prompt as text in the image.
-Object labels are allowed when they help the drawing.
-Do not include scripts, event handlers, external images, external fonts, or remote URLs."""
+"""
 
 
 def build_judge_prompt(original: str, guess: str) -> str:

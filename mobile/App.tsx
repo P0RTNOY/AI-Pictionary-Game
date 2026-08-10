@@ -1,747 +1,852 @@
+import AsyncStorage from "@react-native-async-storage/async-storage";
 import { StatusBar } from "expo-status-bar";
-import {
-  ActivityIndicator,
-  Alert,
-  KeyboardAvoidingView,
-  Platform,
-  Pressable,
-  SafeAreaView,
-  ScrollView,
-  StyleSheet,
-  Text,
-  TextInput,
-  View,
-} from "react-native";
-import { SvgXml } from "react-native-svg";
-import { ArrowLeft, CheckCircle2, Home, PenLine, RefreshCw, Send, Sparkles } from "lucide-react-native";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Alert, AppState, type AppStateStatus, KeyboardAvoidingView, Linking, Platform, SafeAreaView } from "react-native";
 
-const API_URL = process.env.EXPO_PUBLIC_API_URL ?? "http://localhost:8000";
+import { ApiError, configureApiCredential, healthCheck, isUnauthorizedError } from "./src/api/client";
+import { getAIStatus, type AIStatus } from "./src/api/ai";
+import { getGame, getGameStats, listGames } from "./src/api/games";
+import { createUser, getUser, updateUser } from "./src/api/users";
+import { Header } from "./src/components/Header";
+import { useGameEvents } from "./src/hooks/useGameEvents";
+import { usePushNotifications } from "./src/hooks/usePushNotifications";
+import { CreateRoundScreen } from "./src/screens/CreateRoundScreen";
+import { DebugScreen } from "./src/screens/DebugScreen";
+import { GamePendingScreen } from "./src/screens/GamePendingScreen";
+import { GuessScreen } from "./src/screens/GuessScreen";
+import { HomeScreen } from "./src/screens/HomeScreen";
+import { InviteScreen } from "./src/screens/InviteScreen";
+import { OnboardingScreen } from "./src/screens/OnboardingScreen";
+import { ProfileScreen } from "./src/screens/ProfileScreen";
+import { ResultScreen } from "./src/screens/ResultScreen";
+import { WaitingScreen } from "./src/screens/WaitingScreen";
+import { styles } from "./src/styles";
+import type { Game, GameStats, GuessResult, Round, User } from "./src/types/game";
+import { appDiagnostics } from "./src/config";
+import { parseAppLink } from "./src/utils/deepLinks";
+import { captureError, captureMessage } from "./src/utils/errorReporter";
+import { decideSessionBootstrap, restoredSessionDestination } from "./src/sessionBootstrap";
+import { createSessionEpoch } from "./src/sessionEpoch";
+import { createRequestScope } from "./src/requestScope";
+import { createLatestTargetCoordinator, type LatestTargetCoordinator } from "./src/latestTargetCoordinator";
+import { createLatestOperation } from "./src/latestOperation";
+import { createActionContextGuard, isActionContextCurrent, type ActionContext } from "./src/actionContext";
+import { retireGameOpenState, type GameOpenRetirementMode } from "./src/gameOpenState";
+import { decideGameRoute, type GameScreen } from "./src/roundLifecycle";
 
-type RoundStatus = "generating" | "ready_to_guess" | "guessed" | "failed";
-type SvgStatus = "pending" | "done" | "failed";
+type Screen = GameScreen;
 
-type GeneratedSvg = {
-  id: string;
-  model_name: string;
-  model_tier: string;
-  svg_text: string | null;
-  generation_time_seconds: number | null;
-  status: SvgStatus;
-  error_message: string | null;
-};
+const USER_ID_KEY = "ai-pictionary:user-id";
+const SESSION_TOKEN_KEY = "ai-pictionary:session-token";
+const ONBOARDING_KEY = "ai-pictionary:onboarding-complete";
 
-type GuessResult = {
-  round_id: string;
-  guess_text: string;
-  score: number;
-  matched_parts: string[];
-  missed_parts: string[];
-  short_feedback: string;
-  created_at: string;
-};
-
-type Round = {
-  id: string;
-  creator_user_id: string;
-  guesser_user_id: string;
-  original_prompt: string;
-  status: RoundStatus;
-  generated_svgs: GeneratedSvg[];
-  created_at: string;
-  completed_at: string | null;
-  guess: GuessResult | null;
-};
-
-type Screen = "home" | "create" | "waiting" | "guess" | "result";
-
-const randomPrompts = [
-  "a robot making shakshuka for a dragon",
-  "a giraffe teaching a dolphin how to play piano",
-  "a wizard arguing with a toaster in court",
-  "a sleepy astronaut babysitting three moon rocks",
-  "a cactus DJ playing music for penguins",
-];
+type GameOpenTarget = { gameId: string; userId: string; sessionEpoch: number };
 
 export default function App() {
   const [screen, setScreen] = useState<Screen>("home");
-  const [round, setRound] = useState<Round | null>(null);
-  const [prompt, setPrompt] = useState(randomPrompts[0]);
-  const [guess, setGuess] = useState("");
-  const [loading, setLoading] = useState(false);
+  const [user, setUser] = useState<User | null>(null);
+  const [games, setGames] = useState<Game[]>([]);
+  const [selectedGame, setSelectedGame] = useState<Game | null>(null);
+  const [selectedRound, setSelectedRound] = useState<Round | null>(null);
+  const [selectedStats, setSelectedStats] = useState<GameStats | null>(null);
+  const [pendingInviteCode, setPendingInviteCode] = useState<string | null>(null);
+  const [pendingGameId, setPendingGameId] = useState<string | null>(null);
+  const [backendHealth, setBackendHealth] = useState<{ status: "unknown" | "ok" | "unreachable"; message: string }>({
+    status: "unknown",
+    message: "Not checked yet",
+  });
+  const [selectedGameError, setSelectedGameError] = useState<string | null>(null);
+  const [selectedGameLoading, setSelectedGameLoading] = useState(false);
+  const [aiStatus, setAIStatus] = useState<AIStatus | null>(null);
+  const [refreshing, setRefreshing] = useState(false);
+  const [startupError, setStartupError] = useState<string | null>(null);
+  const [startupLoading, setStartupLoading] = useState(false);
+  const [sessionRetiring, setSessionRetiring] = useState(false);
+  const [sessionAccessToken, setSessionAccessToken] = useState<string | null>(null);
+  const [appState, setAppState] = useState<AppStateStatus>(AppState.currentState);
+  const [openingGameId, setOpeningGameId] = useState<string | null>(null);
+  const [actionLifecycleEpoch, setActionLifecycleEpoch] = useState(0);
+  const sessionEpoch = useRef(createSessionEpoch()).current;
+  const identityRequests = useRef(createRequestScope()).current;
+  const gameRequests = useRef(createRequestScope()).current;
+  const userRef = useRef<User | null>(null);
+  const selectedGameRef = useRef<Game | null>(null);
+  const selectedRoundRef = useRef<Round | null>(null);
+  const screenRef = useRef<Screen>(screen);
+  const pendingGameRef = useRef<string | null>(null);
+  const openingGameRef = useRef<string | null>(null);
+  const mountedRef = useRef(true);
+  const gamesRefreshGeneration = useRef(0);
+  const statsRefreshGeneration = useRef(0);
+  const actionLifecycleEpochRef = useRef(0);
+  const gameOpenRetirementGenerationRef = useRef(0);
+  const observedGuessRoundIdRef = useRef<string | null>(null);
+  const selectedRefreshOperation = useRef(createLatestOperation(setSelectedGameLoading)).current;
+  const gameOpenCoordinatorRef = useRef<LatestTargetCoordinator<GameOpenTarget, Game> | null>(null);
+  userRef.current = user;
+  selectedGameRef.current = selectedGame;
+  selectedRoundRef.current = selectedRound;
+  screenRef.current = screen;
+  pendingGameRef.current = pendingGameId;
+  const appIsActive = appState === "active";
+  const renderedActionContext: ActionContext = {
+    epoch: actionLifecycleEpoch,
+    userId: user?.id ?? null,
+    gameId: selectedGame?.id ?? null,
+    roundId: selectedRound?.id ?? selectedGame?.latest_round?.id ?? null,
+  };
+
+  if (!gameOpenCoordinatorRef.current) {
+    gameOpenCoordinatorRef.current = createLatestTargetCoordinator<GameOpenTarget, Game>({
+      key: (target) => `${target.sessionEpoch}:${target.userId}:${target.gameId}`,
+      run: async (target, signal) => {
+        retireActionWork();
+        retireGameWork();
+        return getGame(target.gameId, signal);
+      },
+      accept: (target, game) => {
+        if (!isGameOpenTargetCurrent(target)) return;
+        clearGameOpenState(target.gameId);
+        openGame(game);
+      },
+      reject: (target, error) => {
+        if (!isGameOpenTargetCurrent(target)) return;
+        clearGameOpenState(target.gameId);
+        Alert.alert("Could not open game", friendlyGameLinkError(error));
+      },
+    });
+  }
 
   useEffect(() => {
-    if (!round || (round.status !== "generating" && round.status !== "ready_to_guess")) {
+    ensureLocalUser();
+    refreshBackendHealth();
+    refreshAIStatus();
+    return () => {
+      mountedRef.current = false;
+      identityRequests.retire();
+      gameRequests.retire();
+      selectedRefreshOperation.retire();
+      retireGameOpenWork("clear-pending");
+    };
+  }, []);
+
+  useEffect(() => {
+    Linking.getInitialURL()
+      .then(handleIncomingUrl)
+      .catch(() => {
+        // Deep links are best-effort; normal launch should continue.
+      });
+    const subscription = Linking.addEventListener("url", ({ url }) => handleIncomingUrl(url));
+    return () => subscription.remove();
+  }, []);
+
+  useEffect(() => {
+    if (!user || !appIsActive) {
+      identityRequests.retire();
       return;
     }
-    const interval = setInterval(async () => {
-      const latest = await fetchRound(round.id);
-      if (!latest) {
+    identityRequests.activate(user.id);
+    refreshGames(user.id);
+  }, [user?.id, appIsActive]);
+
+  useEffect(() => {
+    if (!selectedGame || !user || !appIsActive) {
+      gameRequests.retire();
+      selectedRefreshOperation.retire();
+      return;
+    }
+    gameRequests.activate(gameScopeKey(user.id, selectedGame.id));
+  }, [selectedGame?.id, user?.id, appIsActive]);
+
+  useEffect(() => {
+    if (user && pendingInviteCode) setScreen("invites");
+  }, [user?.id, pendingInviteCode]);
+
+  useEffect(() => {
+    if (!user || !pendingGameId || !appIsActive) return;
+    void openGameById(pendingGameId);
+  }, [user?.id, pendingGameId, appIsActive]);
+
+  useEffect(() => {
+    const subscription = AppState.addEventListener("change", (state) => {
+      setAppState(state);
+      if (state === "active") {
+        refreshBackendHealth();
+        refreshAIStatus();
+        const activeUser = userRef.current;
+        const activeGame = selectedGameRef.current;
+        if (!activeUser) {
+          void ensureLocalUser();
+        }
+        if (activeGame && activeUser) {
+          gameRequests.activate(gameScopeKey(activeUser.id, activeGame.id));
+          refreshSelectedGame(activeGame.id, activeUser.id);
+        }
+      } else {
+        identityRequests.retire();
+        gameRequests.retire();
+        selectedRefreshOperation.retire();
+        retireGameOpenWork("preserve-pending");
+        retireActionWork();
+      }
+    });
+    return () => subscription.remove();
+  }, []);
+
+  const handleGameEvents = useCallback((events: { game_id: string }[]) => {
+    const activeGame = selectedGameRef.current;
+    const activeUser = userRef.current;
+    if (!activeGame || !activeUser || events.some((event) => event.game_id !== activeGame.id)) return;
+    void refreshSelectedGame(activeGame.id, activeUser.id);
+  }, []);
+
+  const openGameById = useCallback(
+    async (gameId: string) => {
+      const activeUser = userRef.current;
+      if (!activeUser) return;
+      if (AppState.currentState !== "active") {
+        queuePendingGame(gameId);
         return;
       }
-      setRound(latest);
-      if (latest.status === "ready_to_guess") {
-        setScreen("guess");
-      }
-      if (latest.status === "guessed") {
-        setScreen("result");
-      }
-    }, 1200);
-    return () => clearInterval(interval);
-  }, [round?.id, round?.status]);
-
-  const readySketches = useMemo(
-    () => round?.generated_svgs.filter((svg) => svg.status === "done" && svg.svg_text) ?? [],
-    [round],
+      queuePendingGame(gameId);
+      openingGameRef.current = gameId;
+      setOpeningGameId(gameId);
+      const retirementGeneration = gameOpenRetirementGenerationRef.current;
+      await gameOpenCoordinatorRef.current?.request({
+        gameId,
+        userId: activeUser.id,
+        sessionEpoch: sessionEpoch.capture(),
+      });
+      if (retirementGeneration !== gameOpenRetirementGenerationRef.current) return;
+      if (openingGameRef.current === gameId) clearGameOpenState(gameId);
+    },
+    [],
   );
 
-  async function createChallenge() {
-    if (prompt.trim().length < 6) {
-      Alert.alert("Add a clearer prompt", "Write at least a few words so the artists have something to draw.");
+  const realtimeStatus = useGameEvents({
+    gameId: selectedGame?.id ?? null,
+    userId: user?.id ?? null,
+    enabled: Boolean(selectedGame && user && !sessionRetiring && appIsActive),
+    onEvents: handleGameEvents,
+  });
+  const pushStatus = usePushNotifications(user?.id ?? null, sessionAccessToken, openGameById, !sessionRetiring);
+
+  const showHeader = screen !== "onboarding" && screen !== "profile_setup";
+  const showBack = Boolean(user && screen !== "home");
+  const selectedLatestRound = useMemo(() => selectedRound ?? selectedGame?.latest_round ?? null, [selectedGame, selectedRound]);
+
+  async function ensureLocalUser() {
+    const capturedEpoch = sessionEpoch.capture();
+    setStartupLoading(true);
+    setStartupError(null);
+    let onboardingDone: string | null = null;
+    let storedId: string | null = null;
+    let storedToken: string | null = null;
+    try {
+      [storedId, storedToken, onboardingDone] = await Promise.all([
+        AsyncStorage.getItem(USER_ID_KEY),
+        AsyncStorage.getItem(SESSION_TOKEN_KEY),
+        AsyncStorage.getItem(ONBOARDING_KEY),
+      ]);
+      if (!sessionEpoch.isCurrent(capturedEpoch)) return;
+    } catch (error) {
+      if (!sessionEpoch.isCurrent(capturedEpoch)) return;
+      setStartupError(getErrorMessage(error));
+      setScreen("startup_error");
+      setStartupLoading(false);
       return;
     }
-    setLoading(true);
+
+    if (decideSessionBootstrap(Boolean(storedId), Boolean(storedToken)) === "reonboard") {
+      if (storedId || storedToken) await clearStoredSession();
+      setScreen(onboardingDone ? "profile_setup" : "onboarding");
+      setStartupLoading(false);
+      return;
+    }
+
+    configureApiCredential(storedToken);
+    identityRequests.activate(storedId!);
+    const request = identityRequests.begin(storedId!);
     try {
-      const response = await fetch(`${API_URL}/rounds`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ prompt: prompt.trim() }),
-      });
-      if (!response.ok) {
-        throw new Error(await response.text());
+      const existing = await getUser(storedId!, request.signal);
+      if (!sessionEpoch.isCurrent(capturedEpoch) || !request.isCurrent()) return;
+      sessionEpoch.activate();
+      identityRequests.activate(existing.id);
+      userRef.current = existing;
+      setSessionAccessToken(storedToken);
+      setUser(existing);
+      setStartupError(null);
+      setScreen(restoredSessionDestination(Boolean(pendingInviteCode)));
+    } catch (error) {
+      if (!sessionEpoch.isCurrent(capturedEpoch) || !request.isCurrent()) return;
+      const failure = isUnauthorizedError(error) ? "unauthorized" : "transient";
+      if (decideSessionBootstrap(true, true, failure) === "reonboard") {
+        await clearStoredSession();
+        setScreen(onboardingDone ? "profile_setup" : "onboarding");
+        setStartupLoading(false);
+        return;
       }
-      const created: Round = await response.json();
-      setRound(created);
-      setGuess("");
+      setStartupError(getErrorMessage(error));
+      setScreen("startup_error");
+    } finally {
+      request.finish();
+    }
+    setStartupLoading(false);
+  }
+
+  async function clearStoredSession() {
+    configureApiCredential(null);
+    setSessionAccessToken(null);
+    await Promise.all([
+      AsyncStorage.removeItem(USER_ID_KEY),
+      AsyncStorage.removeItem(SESSION_TOKEN_KEY),
+    ]);
+  }
+
+  async function refreshBackendHealth() {
+    try {
+      const result = await healthCheck();
+      setBackendHealth({ status: result.status === "ok" ? "ok" : "unknown", message: result.status });
+    } catch (error) {
+      captureError(error, { area: "backend_health" });
+      setBackendHealth({ status: "unreachable", message: error instanceof Error ? error.message : "Backend is unreachable" });
+    }
+  }
+
+  async function refreshAIStatus() {
+    try {
+      setAIStatus(await getAIStatus());
+    } catch (error) {
+      captureError(error, { area: "ai_status" });
+    }
+  }
+
+  function handleIncomingUrl(url: string | null) {
+    const link = parseAppLink(url);
+    if (!link) return;
+    captureMessage("App deep link received", { area: "deep_link", kind: link.kind });
+    if (link.kind === "invite") {
+      retireGameOpenWork("clear-pending");
+      setPendingInviteCode(link.code);
+      if (userRef.current) {
+        retireActionWork();
+        retireGameWork();
+        selectedGameRef.current = null;
+        selectedRoundRef.current = null;
+        setSelectedGame(null);
+        setSelectedRound(null);
+        setScreen("invites");
+      }
+    } else {
+      setPendingInviteCode(null);
+      if (userRef.current && AppState.currentState === "active") void openGameById(link.gameId);
+      else queuePendingGame(link.gameId);
+    }
+  }
+
+  async function refreshGames(userId: string) {
+    if (AppState.currentState !== "active") return;
+    const capturedEpoch = sessionEpoch.capture();
+    const generation = ++gamesRefreshGeneration.current;
+    identityRequests.activate(userId);
+    const request = identityRequests.begin(userId);
+    setRefreshing(true);
+    try {
+      const refreshedGames = await listGames(userId, request.signal);
+      if (request.isCurrent() && generation === gamesRefreshGeneration.current) sessionEpoch.runIfCurrent(capturedEpoch, () => setGames(refreshedGames));
+    } catch (error) {
+      if (request.isCurrent() && generation === gamesRefreshGeneration.current) sessionEpoch.runIfCurrent(capturedEpoch, () => {
+        captureError(error, { area: "games_refresh", userId });
+        Alert.alert("Could not load games", getErrorMessage(error));
+      });
+    } finally {
+      if (generation === gamesRefreshGeneration.current) {
+        request.runIfCurrent(() => sessionEpoch.runIfCurrent(capturedEpoch, () => setRefreshing(false)));
+      }
+      request.finish();
+    }
+  }
+
+  async function refreshSelectedGame(gameId: string, userId: string) {
+    if (AppState.currentState !== "active") return;
+    const capturedEpoch = sessionEpoch.capture();
+    const key = gameScopeKey(userId, gameId);
+    const request = selectedRefreshOperation.begin(key);
+    setSelectedGameError(null);
+    try {
+      const latest = await getGame(gameId, request.signal);
+      if (!sessionEpoch.isCurrent(capturedEpoch) || !request.isCurrent()) return;
+      if (selectedGameRef.current?.id !== gameId || userRef.current?.id !== userId) return;
+      selectedGameRef.current = latest;
+      selectedRoundRef.current = latest.latest_round;
+      setSelectedGame(latest);
+      setSelectedRound(latest.latest_round);
+      void refreshStats(gameId, userId);
+      routeForGame(latest, false);
+      captureMessage("Selected game refreshed", { area: "navigation", gameId, target: screenRef.current });
+    } catch (error) {
+      if (!sessionEpoch.isCurrent(capturedEpoch) || !request.isCurrent()) return;
+      captureError(error, { area: "selected_game_refresh", gameId, userId });
+      setSelectedGameError(getErrorMessage(error));
       setScreen("waiting");
-    } catch (error) {
-      Alert.alert("Could not create challenge", getErrorMessage(error));
     } finally {
-      setLoading(false);
+      request.settle();
     }
   }
 
-  async function submitGuess() {
-    if (!round || guess.trim().length < 2) {
+  async function refreshStats(gameId: string, userId: string) {
+    if (AppState.currentState !== "active") return;
+    const capturedEpoch = sessionEpoch.capture();
+    const generation = ++statsRefreshGeneration.current;
+    const request = gameRequests.begin(gameScopeKey(userId, gameId));
+    try {
+      const stats = await getGameStats(gameId, request.signal);
+      if (generation === statsRefreshGeneration.current) request.runIfCurrent(() => sessionEpoch.runIfCurrent(capturedEpoch, () => setSelectedStats(stats)));
+    } catch {
+      if (generation === statsRefreshGeneration.current) request.runIfCurrent(() => sessionEpoch.runIfCurrent(capturedEpoch, () => setSelectedStats(null)));
+    } finally {
+      request.finish();
+    }
+  }
+
+  function openGame(game: Game) {
+    const activeUser = userRef.current;
+    if (!activeUser) return;
+    retireGameWork();
+    observedGuessRoundIdRef.current = null;
+    gameRequests.activate(gameScopeKey(activeUser.id, game.id));
+    selectedGameRef.current = game;
+    selectedRoundRef.current = game.latest_round;
+    setSelectedGame(game);
+    setSelectedRound(game.latest_round);
+    setSelectedStats(null);
+    setSelectedGameError(null);
+    void refreshStats(game.id, activeUser.id);
+    routeForGame(game, true);
+  }
+
+  function routeForGame(game: Game, force: boolean) {
+    const activeUser = userRef.current;
+    if (!activeUser) return;
+    const decision = decideGameRoute({
+      latestRound: game.latest_round,
+      currentTurnUserId: game.current_turn_user_id,
+      userId: activeUser.id,
+      currentScreen: screenRef.current,
+      force,
+      observedGuessRoundId: observedGuessRoundIdRef.current,
+    });
+    observedGuessRoundIdRef.current = decision.observedGuessRoundId;
+    setScreen(decision.screen);
+  }
+
+  async function handleLocalStateReset() {
+    await retireSessionAndResetClient(true);
+  }
+
+  async function handleBackendDataReset() {
+    await retireSessionAndResetClient(false);
+  }
+
+  async function retireSessionAndResetClient(unregisterPush: boolean) {
+    sessionEpoch.retire();
+    identityRequests.retire();
+    retireGameOpenWork("clear-pending");
+    retireActionWork();
+    retireGameWork();
+    userRef.current = null;
+    selectedGameRef.current = null;
+    selectedRoundRef.current = null;
+    setSessionRetiring(true);
+    let resetError: unknown = null;
+    try {
+      if (unregisterPush) {
+        try {
+          await pushStatus.unregisterCurrentToken();
+        } catch (error) {
+          captureError(error, { area: "push_unregistration_during_reset", userId: user?.id ?? null });
+        }
+      }
+      try {
+        await clearStoredSession();
+        await AsyncStorage.removeItem(ONBOARDING_KEY);
+      } catch (error) {
+        resetError = error;
+      }
+    } finally {
+      // Local state is retired even when best-effort push or storage cleanup fails.
+      configureApiCredential(null);
+      setSessionAccessToken(null);
+      setUser(null);
+      selectedGameRef.current = null;
+      selectedRoundRef.current = null;
+      observedGuessRoundIdRef.current = null;
+      setSelectedGame(null);
+      setSelectedRound(null);
+      setSelectedStats(null);
+      setGames([]);
+      setPendingInviteCode(null);
+      pendingGameRef.current = null;
+      setPendingGameId(null);
+      setSelectedGameError(null);
+      setSelectedGameLoading(false);
+      setRefreshing(false);
+      setStartupLoading(false);
+      setStartupError(null);
+      openingGameRef.current = null;
+      setOpeningGameId(null);
+      setScreen("onboarding");
+      setSessionRetiring(false);
+    }
+    if (resetError) throw resetError;
+  }
+
+  async function handleInviteJoined(capturedContext: ActionContext, game: Game) {
+    if (!actionContextIsCurrent(capturedContext)) return;
+    const capturedEpoch = sessionEpoch.capture();
+    setPendingInviteCode(null);
+    const activeUser = userRef.current;
+    if (!activeUser) return;
+    const request = selectedRefreshOperation.begin(gameScopeKey(activeUser.id, game.id));
+    captureMessage("Invite join response", {
+      area: "invite_join",
+      gameId: game.id,
+      currentTurnUserId: game.current_turn_user_id,
+      latestRoundId: game.latest_round?.id ?? null,
+    });
+    setSelectedGameError(null);
+    try {
+      const [joinedGame, refreshedGames] = await Promise.all([getGame(game.id, request.signal), listGames(activeUser.id, request.signal)]);
+      if (!sessionEpoch.isCurrent(capturedEpoch) || !request.isCurrent() || !actionContextIsCurrent(capturedContext)) return;
+      captureMessage("Games refreshed after invite join", { area: "invite_join", gameId: game.id, count: refreshedGames.length });
+      setGames(refreshedGames);
+      openGame(joinedGame);
+      captureMessage("Navigation after invite join", {
+        area: "invite_join",
+        gameId: joinedGame.id,
+        hasRound: Boolean(joinedGame.latest_round),
+        currentTurnUserId: joinedGame.current_turn_user_id,
+      });
+    } catch (error) {
+      if (!sessionEpoch.isCurrent(capturedEpoch) || !request.isCurrent() || !actionContextIsCurrent(capturedContext)) return;
+      captureError(error, { area: "invite_join_fetch_game", gameId: game.id, userId: activeUser.id });
+      openGame(game);
+      setSelectedGameError(getErrorMessage(error));
+      setScreen("waiting");
+      refreshGames(activeUser.id);
+    } finally {
+      request.settle();
+    }
+  }
+
+  function handleRoundCreated(round: Round, capturedContext: ActionContext) {
+    if (!actionContextIsCurrent(capturedContext) || round.game_id !== capturedContext.gameId) return;
+    selectedRoundRef.current = round;
+    observedGuessRoundIdRef.current = null;
+    setSelectedRound(round);
+    setSelectedGame((game) => (game ? { ...game, latest_round: round } : game));
+    setScreen("waiting");
+  }
+
+  function handleRoundRetry(round: Round, capturedContext: ActionContext) {
+    if (!actionContextIsCurrent(capturedContext) || round.id !== capturedContext.roundId || round.game_id !== capturedContext.gameId) return;
+    selectedRoundRef.current = round;
+    setSelectedRound(round);
+    setSelectedGame((game) => (game ? { ...game, latest_round: round } : game));
+    setScreen("waiting");
+  }
+
+  function handleGuessResult(result: GuessResult, capturedContext: ActionContext) {
+    const activeRound = selectedRoundRef.current;
+    const activeGame = selectedGameRef.current;
+    const activeUser = userRef.current;
+    if (!activeRound || !activeGame || !activeUser || !actionContextIsCurrent(capturedContext) || result.round_id !== capturedContext.roundId) return;
+    const updatedRound: Round = { ...activeRound, status: "guessed", guess: result, completed_at: result.created_at };
+    observedGuessRoundIdRef.current = activeRound.id;
+    selectedRoundRef.current = updatedRound;
+    setSelectedRound(updatedRound);
+    setSelectedGame((game) => (game ? { ...game, latest_round: updatedRound, current_turn_user_id: activeUser.id } : game));
+    void refreshStats(activeGame.id, activeUser.id);
+    setScreen("result");
+  }
+
+  function goHome() {
+    if (user) refreshGames(user.id);
+    retireGameOpenWork("clear-pending");
+    retireActionWork();
+    retireGameWork();
+    selectedGameRef.current = null;
+    selectedRoundRef.current = null;
+    observedGuessRoundIdRef.current = null;
+    setSelectedGame(null);
+    setSelectedRound(null);
+    setSelectedStats(null);
+    setSelectedGameError(null);
+    setScreen("home");
+  }
+
+  function goBack() {
+    if (screen === "invites" || screen === "edit_profile" || screen === "debug") {
+      goHome();
       return;
     }
-    setLoading(true);
-    try {
-      const response = await fetch(`${API_URL}/rounds/${round.id}/guess`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ guess_text: guess.trim() }),
-      });
-      if (!response.ok) {
-        throw new Error(await response.text());
-      }
-      const result: GuessResult = await response.json();
-      setRound({ ...round, status: "guessed", guess: result, completed_at: result.created_at });
-      setScreen("result");
-    } catch (error) {
-      Alert.alert("Could not score guess", getErrorMessage(error));
-    } finally {
-      setLoading(false);
-    }
+    goHome();
   }
 
-  function resetForNextChallenge() {
-    setPrompt(randomPrompts[Math.floor(Math.random() * randomPrompts.length)]);
-    setGuess("");
-    setRound(null);
-    setScreen("create");
+  function goToNextRound() {
+    observedGuessRoundIdRef.current = null;
+    setScreen("create_round");
+  }
+
+  async function completeOnboarding() {
+    await AsyncStorage.setItem(ONBOARDING_KEY, "1");
+    setScreen(user ? (pendingInviteCode ? "invites" : "home") : "profile_setup");
+  }
+
+  function retireActionWork() {
+    const nextEpoch = actionLifecycleEpochRef.current + 1;
+    actionLifecycleEpochRef.current = nextEpoch;
+    if (mountedRef.current) setActionLifecycleEpoch(nextEpoch);
+  }
+
+  function retireGameWork() {
+    gameRequests.retire();
+    selectedRefreshOperation.retire();
+    statsRefreshGeneration.current += 1;
+  }
+
+  function currentActionContext(): ActionContext {
+    return {
+      epoch: actionLifecycleEpochRef.current,
+      userId: userRef.current?.id ?? null,
+      gameId: selectedGameRef.current?.id ?? null,
+      roundId: selectedRoundRef.current?.id ?? selectedGameRef.current?.latest_round?.id ?? null,
+    };
+  }
+
+  function actionContextIsCurrent(capturedContext: ActionContext) {
+    return isActionContextCurrent(capturedContext, currentActionContext(), AppState.currentState === "active");
+  }
+
+  function isGameOpenTargetCurrent(target: GameOpenTarget) {
+    return (
+      AppState.currentState === "active" &&
+      userRef.current?.id === target.userId &&
+      sessionEpoch.isCurrent(target.sessionEpoch)
+    );
+  }
+
+  function queuePendingGame(gameId: string) {
+    pendingGameRef.current = gameId;
+    if (mountedRef.current) setPendingGameId(gameId);
+  }
+
+  function retireGameOpenWork(mode: GameOpenRetirementMode) {
+    gameOpenRetirementGenerationRef.current += 1;
+    gameOpenCoordinatorRef.current?.retire();
+    const next = retireGameOpenState(
+      { pendingGameId: pendingGameRef.current, openingGameId: openingGameRef.current },
+      mode,
+    );
+    pendingGameRef.current = next.pendingGameId;
+    openingGameRef.current = next.openingGameId;
+    if (!mountedRef.current) return;
+    setPendingGameId(next.pendingGameId);
+    setOpeningGameId(next.openingGameId);
+  }
+
+  function clearGameOpenState(gameId: string) {
+    if (pendingGameRef.current === gameId) {
+      pendingGameRef.current = null;
+      if (mountedRef.current) setPendingGameId(null);
+    }
+    if (openingGameRef.current === gameId) {
+      openingGameRef.current = null;
+      if (mountedRef.current) setOpeningGameId(null);
+    }
   }
 
   return (
     <SafeAreaView style={styles.safeArea}>
       <StatusBar style="dark" />
       <KeyboardAvoidingView behavior={Platform.OS === "ios" ? "padding" : undefined} style={styles.shell}>
-        <Header screen={screen} onHome={() => setScreen("home")} onBack={() => setScreen(round ? "guess" : "home")} />
-        {screen === "home" && (
-          <ScrollView contentContainerStyle={styles.content}>
-            <View style={styles.hero}>
-              <View style={styles.heroIcon}>
-                <Sparkles size={30} color={colors.ink} strokeWidth={2.2} />
-              </View>
-              <Text style={styles.title}>AI Pictionary</Text>
-              <Text style={styles.subtitle}>Turn a strange sentence into three AI sketches, then let the other player guess it.</Text>
-            </View>
-
-            {round ? (
-              <Pressable
-                accessibilityRole="button"
-                accessibilityLabel="Open current round"
-                onPress={() => setScreen(round.status === "guessed" ? "result" : round.status === "ready_to_guess" ? "guess" : "waiting")}
-                style={({ pressed }) => [styles.gameRow, pressed && styles.pressed]}
-              >
-                <View style={styles.gameRowMain}>
-                  <Text style={styles.gameTitle}>Local match</Text>
-                  <Text style={styles.gamePrompt} numberOfLines={2}>
-                    {round.status === "guessed" ? round.guess?.short_feedback : round.original_prompt}
-                  </Text>
-                </View>
-                <StatusPill status={round.status} />
-              </Pressable>
-            ) : (
-              <View style={styles.emptyPanel}>
-                <Text style={styles.emptyTitle}>No active rounds</Text>
-                <Text style={styles.mutedText}>Start with one weird situation and the local artists will draw immediately.</Text>
-              </View>
-            )}
-
-            <PrimaryButton label="Create challenge" icon={<PenLine size={20} color={colors.paper} />} onPress={() => setScreen("create")} />
-          </ScrollView>
+        {showHeader && <Header showBack={showBack} onHome={goHome} onBack={goBack} />}
+        {screen === "onboarding" && <OnboardingScreen onDone={completeOnboarding} />}
+        {screen === "profile_setup" && (
+          <ProfileScreen
+            user={null}
+            lifecycleEpoch={actionLifecycleEpoch}
+            onSave={async (payload, signal) => {
+              const profileActionIsCurrent = createActionContextGuard(
+                renderedActionContext,
+                currentActionContext,
+                () => AppState.currentState === "active",
+              );
+              if (!profileActionIsCurrent(signal)) return;
+              const session = await createUser(payload.display_name, payload.avatar_emoji, payload.avatar_color, signal);
+              if (!profileActionIsCurrent(signal)) return;
+              await Promise.all([
+                AsyncStorage.setItem(USER_ID_KEY, session.user.id),
+                AsyncStorage.setItem(SESSION_TOKEN_KEY, session.access_token),
+              ]);
+              if (!profileActionIsCurrent(signal)) return;
+              configureApiCredential(session.access_token);
+              sessionEpoch.activate();
+              identityRequests.activate(session.user.id);
+              userRef.current = session.user;
+              setSessionAccessToken(session.access_token);
+              setUser(session.user);
+              setScreen(pendingInviteCode ? "invites" : "home");
+            }}
+          />
         )}
-
-        {screen === "create" && (
-          <ScrollView contentContainerStyle={styles.content}>
-            <Text style={styles.sectionTitle}>New challenge</Text>
-            <View style={styles.fieldGroup}>
-              <Text style={styles.label}>Situation prompt</Text>
-              <TextInput
-                accessibilityLabel="Situation prompt"
-                multiline
-                value={prompt}
-                onChangeText={setPrompt}
-                style={styles.promptInput}
-                textAlignVertical="top"
-                placeholder="a robot making shakshuka for a dragon"
-                placeholderTextColor={colors.muted}
-              />
-            </View>
-            <View style={styles.row}>
-              <SecondaryButton
-                label="Random"
-                icon={<RefreshCw size={18} color={colors.ink} />}
-                onPress={() => setPrompt(randomPrompts[Math.floor(Math.random() * randomPrompts.length)])}
-              />
-              <View style={styles.rowFill}>
-                <PrimaryButton
-                  label={loading ? "Sending" : "Generate"}
-                  icon={loading ? <ActivityIndicator color={colors.paper} /> : <Send size={19} color={colors.paper} />}
-                  onPress={createChallenge}
-                  disabled={loading}
-                />
-              </View>
-            </View>
-          </ScrollView>
+        {screen === "startup_error" && (
+          <GamePendingScreen
+            game={null}
+            loading={startupLoading}
+            error={startupError || "The backend is unavailable. Your saved session is still on this device."}
+            errorTitle="Could not restore your session"
+            onRetry={ensureLocalUser}
+            onHome={ensureLocalUser}
+          />
         )}
-
-        {screen === "waiting" && round && (
-          <ScrollView contentContainerStyle={styles.content}>
-            <Text style={styles.sectionTitle}>Artists are drawing</Text>
-            <View style={styles.progressPanel}>
-              {round.generated_svgs.map((svg, index) => (
-                <View key={svg.id} style={styles.artistRow}>
-                  <View style={styles.artistBadge}>
-                    <Text style={styles.artistNumber}>{index + 1}</Text>
-                  </View>
-                  <View style={styles.gameRowMain}>
-                    <Text style={styles.artistName}>Sketch {index + 1}</Text>
-                    <Text style={styles.mutedText}>{svg.status === "done" ? `${svg.generation_time_seconds ?? 0}s` : svg.status}</Text>
-                  </View>
-                  {svg.status === "done" ? (
-                    <CheckCircle2 size={24} color={colors.mint} />
-                  ) : (
-                    <ActivityIndicator color={colors.blue} />
-                  )}
-                </View>
-              ))}
-            </View>
-          </ScrollView>
+        {user && screen === "edit_profile" && (
+          <ProfileScreen
+            user={user}
+            lifecycleEpoch={actionLifecycleEpoch}
+            onCancel={() => {
+              goHome();
+            }}
+            onSave={async (payload, signal) => {
+              const profileActionIsCurrent = createActionContextGuard(
+                renderedActionContext,
+                currentActionContext,
+                () => AppState.currentState === "active",
+              );
+              if (!profileActionIsCurrent(signal)) return;
+              const updated = await updateUser(user.id, payload, signal);
+              if (!profileActionIsCurrent(signal)) return;
+              userRef.current = updated;
+              setUser(updated);
+              setScreen("home");
+            }}
+          />
         )}
-
-        {screen === "guess" && round && (
-          <ScrollView contentContainerStyle={styles.content}>
-            <Text style={styles.sectionTitle}>Guess the prompt</Text>
-            <View style={styles.sketchGrid}>
-              {readySketches.map((svg, index) => (
-                <View key={svg.id} style={styles.sketchCard}>
-                  <Text style={styles.sketchLabel}>Sketch {index + 1}</Text>
-                  <SvgXml xml={svg.svg_text ?? ""} width="100%" height={220} />
-                </View>
-              ))}
-            </View>
-            <View style={styles.fieldGroup}>
-              <Text style={styles.label}>Your guess</Text>
-              <TextInput
-                accessibilityLabel="Your guess"
-                value={guess}
-                onChangeText={setGuess}
-                style={styles.guessInput}
-                placeholder="giraffe gives dolphin piano lesson"
-                placeholderTextColor={colors.muted}
-              />
-            </View>
-            <PrimaryButton
-              label={loading ? "Scoring" : "Submit guess"}
-              icon={loading ? <ActivityIndicator color={colors.paper} /> : <CheckCircle2 size={20} color={colors.paper} />}
-              onPress={submitGuess}
-              disabled={loading || guess.trim().length < 2}
-            />
-          </ScrollView>
+        {user && screen === "home" && (
+          <HomeScreen
+            user={user}
+            games={games}
+            backendHealth={backendHealth}
+            refreshing={refreshing}
+            onRefresh={() => {
+              refreshBackendHealth();
+              refreshGames(user.id);
+            }}
+            onEditProfile={() => setScreen("edit_profile")}
+            onCreateGame={() => setScreen("invites")}
+            onOpenGame={(game) => void openGameById(game.id)}
+            openingGameId={openingGameId}
+            onOpenDebug={() => setScreen("debug")}
+          />
         )}
-
-        {screen === "result" && round?.guess && (
-          <ScrollView contentContainerStyle={styles.content}>
-            <View style={styles.scorePanel}>
-              <Text style={styles.scoreNumber}>{round.guess.score}</Text>
-              <Text style={styles.scoreLabel}>semantic score</Text>
-              <Text style={styles.feedback}>{round.guess.short_feedback}</Text>
-            </View>
-            <ResultLine label="Original" value={round.original_prompt} />
-            <ResultLine label="Guess" value={round.guess.guess_text} />
-            <TagBlock title="Matched" tags={round.guess.matched_parts} empty="No key parts matched yet." tone="mint" />
-            <TagBlock title="Missed" tags={round.guess.missed_parts} empty="Nothing major missed." tone="coral" />
-            <PrimaryButton label="Next challenge" icon={<PenLine size={20} color={colors.paper} />} onPress={resetForNextChallenge} />
-          </ScrollView>
+        {user && screen === "debug" && (
+          <DebugScreen
+            user={user}
+            selectedGameId={selectedGame?.id ?? null}
+            selectedRound={selectedLatestRound}
+            diagnostics={appDiagnostics()}
+            backendHealth={backendHealth}
+            onRefreshBackendHealth={refreshBackendHealth}
+            onResetLocalState={handleLocalStateReset}
+            onBackendResetComplete={handleBackendDataReset}
+            aiStatus={aiStatus}
+            lifecycleEpoch={actionLifecycleEpoch}
+            info={{
+              realtimeConnected: realtimeStatus.connected,
+              fallbackPolling: realtimeStatus.fallbackPolling,
+              lastEventId: realtimeStatus.lastEventId,
+              lastEventType: realtimeStatus.lastEventType,
+              pushPermissionStatus: pushStatus.permissionStatus,
+              pushRegistered: pushStatus.registered,
+              pushTokenFingerprint: pushStatus.tokenFingerprint,
+              pushError: pushStatus.registrationError,
+              refreshPushRegistration: pushStatus.refreshRegistration,
+            }}
+          />
+        )}
+        {user && screen === "invites" && (
+          <InviteScreen
+            userId={user.id}
+            lifecycleEpoch={actionLifecycleEpoch}
+            initialCode={pendingInviteCode}
+            onInitialCodeHandled={() => setPendingInviteCode(null)}
+            onJoined={(game) => handleInviteJoined(renderedActionContext, game)}
+          />
+        )}
+        {user && screen === "waiting" && selectedGame && !selectedLatestRound && (
+          <GamePendingScreen
+            game={selectedGame}
+            loading={selectedGameLoading}
+            error={selectedGameError}
+            onRetry={() => refreshSelectedGame(selectedGame.id, user.id)}
+            onHome={goHome}
+          />
+        )}
+        {user && screen === "waiting" && !selectedGame && (
+          <GamePendingScreen game={null} loading={selectedGameLoading} error={selectedGameError || "No game is selected."} onRetry={goHome} onHome={goHome} />
+        )}
+        {user && selectedGame && screen === "create_round" && (
+          <CreateRoundScreen
+            game={selectedGame}
+            userId={user.id}
+            lifecycleEpoch={actionLifecycleEpoch}
+            onCreated={(round) => handleRoundCreated(round, renderedActionContext)}
+          />
+        )}
+        {user && selectedLatestRound && screen === "waiting" && (
+          <WaitingScreen
+            round={selectedLatestRound}
+            userId={user.id}
+            lifecycleEpoch={actionLifecycleEpoch}
+            onRetry={(round) => handleRoundRetry(round, renderedActionContext)}
+            onContinue={() => setScreen("guess")}
+          />
+        )}
+        {user && selectedLatestRound && selectedGame && screen === "guess" && (
+          <GuessScreen
+            round={selectedLatestRound}
+            gameId={selectedGame.id}
+            userId={user.id}
+            lifecycleEpoch={actionLifecycleEpoch}
+            onResult={(result) => handleGuessResult(result, renderedActionContext)}
+          />
+        )}
+        {selectedLatestRound && screen === "result" && (
+          <ResultScreen
+            round={selectedLatestRound}
+            canCreateNext={Boolean(user && selectedGame?.current_turn_user_id === user.id)}
+            onNext={goToNextRound}
+            stats={selectedStats}
+            userId={user?.id}
+          />
         )}
       </KeyboardAvoidingView>
     </SafeAreaView>
   );
 }
 
-function Header({ screen, onHome, onBack }: { screen: Screen; onHome: () => void; onBack: () => void }) {
-  const showBack = screen !== "home";
-  return (
-    <View style={styles.header}>
-      <Pressable
-        accessibilityRole="button"
-        accessibilityLabel={showBack ? "Go back" : "Go home"}
-        onPress={showBack ? onBack : onHome}
-        style={({ pressed }) => [styles.iconButton, pressed && styles.pressed]}
-      >
-        {showBack ? <ArrowLeft size={23} color={colors.ink} /> : <Home size={22} color={colors.ink} />}
-      </Pressable>
-      <Text style={styles.headerTitle}>Daily sketch duel</Text>
-      <View style={styles.iconButtonSpacer} />
-    </View>
-  );
-}
-
-function PrimaryButton({
-  label,
-  icon,
-  onPress,
-  disabled,
-}: {
-  label: string;
-  icon: React.ReactNode;
-  onPress: () => void;
-  disabled?: boolean;
-}) {
-  return (
-    <Pressable
-      accessibilityRole="button"
-      accessibilityState={{ disabled: Boolean(disabled) }}
-      disabled={disabled}
-      onPress={onPress}
-      style={({ pressed }) => [styles.primaryButton, disabled && styles.disabled, pressed && styles.pressed]}
-    >
-      {icon}
-      <Text style={styles.primaryButtonText}>{label}</Text>
-    </Pressable>
-  );
-}
-
-function SecondaryButton({ label, icon, onPress }: { label: string; icon: React.ReactNode; onPress: () => void }) {
-  return (
-    <Pressable accessibilityRole="button" onPress={onPress} style={({ pressed }) => [styles.secondaryButton, pressed && styles.pressed]}>
-      {icon}
-      <Text style={styles.secondaryButtonText}>{label}</Text>
-    </Pressable>
-  );
-}
-
-function StatusPill({ status }: { status: RoundStatus }) {
-  const label = status === "ready_to_guess" ? "Your turn" : status === "generating" ? "Drawing" : status === "guessed" ? "Scored" : "Failed";
-  return (
-    <View style={[styles.statusPill, status === "ready_to_guess" && styles.statusReady]}>
-      <Text style={styles.statusText}>{label}</Text>
-    </View>
-  );
-}
-
-function ResultLine({ label, value }: { label: string; value: string }) {
-  return (
-    <View style={styles.resultLine}>
-      <Text style={styles.label}>{label}</Text>
-      <Text style={styles.resultText}>{value}</Text>
-    </View>
-  );
-}
-
-function TagBlock({
-  title,
-  tags,
-  empty,
-  tone,
-}: {
-  title: string;
-  tags: string[];
-  empty: string;
-  tone: "mint" | "coral";
-}) {
-  return (
-    <View style={styles.resultLine}>
-      <Text style={styles.label}>{title}</Text>
-      {tags.length ? (
-        <View style={styles.tags}>
-          {tags.map((tag) => (
-            <View key={tag} style={[styles.tag, tone === "mint" ? styles.tagMint : styles.tagCoral]}>
-              <Text style={styles.tagText}>{tag}</Text>
-            </View>
-          ))}
-        </View>
-      ) : (
-        <Text style={styles.mutedText}>{empty}</Text>
-      )}
-    </View>
-  );
-}
-
-async function fetchRound(roundId: string): Promise<Round | null> {
-  try {
-    const response = await fetch(`${API_URL}/rounds/${roundId}`);
-    if (!response.ok) {
-      return null;
-    }
-    return response.json();
-  } catch {
-    return null;
-  }
-}
-
 function getErrorMessage(error: unknown) {
   return error instanceof Error ? error.message : "Unknown error";
 }
 
-const colors = {
-  paper: "#FAF7F0",
-  surface: "#FFFFFF",
-  ink: "#171717",
-  muted: "#6B7280",
-  line: "#E7E0D3",
-  coral: "#FF6B5F",
-  mint: "#24A98C",
-  gold: "#F5C84C",
-  blue: "#4E79FF",
-};
+function gameScopeKey(userId: string, gameId: string) {
+  return `${userId}:${gameId}`;
+}
 
-const styles = StyleSheet.create({
-  safeArea: {
-    flex: 1,
-    backgroundColor: colors.paper,
-  },
-  shell: {
-    flex: 1,
-  },
-  header: {
-    minHeight: 60,
-    paddingHorizontal: 16,
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-    borderBottomWidth: 1,
-    borderBottomColor: colors.line,
-  },
-  headerTitle: {
-    fontSize: 16,
-    fontWeight: "700",
-    color: colors.ink,
-  },
-  iconButton: {
-    width: 48,
-    height: 48,
-    borderRadius: 8,
-    alignItems: "center",
-    justifyContent: "center",
-    backgroundColor: colors.surface,
-    borderWidth: 1,
-    borderColor: colors.line,
-  },
-  iconButtonSpacer: {
-    width: 48,
-    height: 48,
-  },
-  content: {
-    padding: 20,
-    gap: 18,
-    paddingBottom: 36,
-  },
-  hero: {
-    paddingTop: 12,
-    gap: 12,
-  },
-  heroIcon: {
-    width: 58,
-    height: 58,
-    borderRadius: 8,
-    alignItems: "center",
-    justifyContent: "center",
-    backgroundColor: colors.gold,
-    borderWidth: 1,
-    borderColor: colors.ink,
-  },
-  title: {
-    fontSize: 34,
-    lineHeight: 40,
-    fontWeight: "800",
-    color: colors.ink,
-  },
-  subtitle: {
-    fontSize: 17,
-    lineHeight: 25,
-    color: colors.muted,
-  },
-  sectionTitle: {
-    fontSize: 26,
-    lineHeight: 32,
-    fontWeight: "800",
-    color: colors.ink,
-  },
-  emptyPanel: {
-    padding: 18,
-    borderRadius: 8,
-    backgroundColor: colors.surface,
-    borderWidth: 1,
-    borderColor: colors.line,
-    gap: 6,
-  },
-  emptyTitle: {
-    fontSize: 18,
-    fontWeight: "800",
-    color: colors.ink,
-  },
-  mutedText: {
-    fontSize: 14,
-    lineHeight: 20,
-    color: colors.muted,
-  },
-  gameRow: {
-    minHeight: 92,
-    padding: 16,
-    borderRadius: 8,
-    backgroundColor: colors.surface,
-    borderWidth: 1,
-    borderColor: colors.line,
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 12,
-  },
-  gameRowMain: {
-    flex: 1,
-    gap: 4,
-  },
-  gameTitle: {
-    fontSize: 18,
-    fontWeight: "800",
-    color: colors.ink,
-  },
-  gamePrompt: {
-    fontSize: 14,
-    lineHeight: 20,
-    color: colors.muted,
-  },
-  statusPill: {
-    minHeight: 32,
-    paddingHorizontal: 10,
-    alignItems: "center",
-    justifyContent: "center",
-    borderRadius: 8,
-    backgroundColor: "#EEF2FF",
-  },
-  statusReady: {
-    backgroundColor: "#DDF7EF",
-  },
-  statusText: {
-    fontSize: 12,
-    fontWeight: "800",
-    color: colors.ink,
-  },
-  fieldGroup: {
-    gap: 8,
-  },
-  label: {
-    fontSize: 13,
-    fontWeight: "800",
-    textTransform: "uppercase",
-    color: colors.muted,
-  },
-  promptInput: {
-    minHeight: 164,
-    padding: 16,
-    borderRadius: 8,
-    backgroundColor: colors.surface,
-    borderWidth: 1,
-    borderColor: colors.line,
-    fontSize: 17,
-    lineHeight: 24,
-    color: colors.ink,
-  },
-  guessInput: {
-    minHeight: 54,
-    paddingHorizontal: 16,
-    borderRadius: 8,
-    backgroundColor: colors.surface,
-    borderWidth: 1,
-    borderColor: colors.line,
-    fontSize: 17,
-    color: colors.ink,
-  },
-  row: {
-    flexDirection: "row",
-    gap: 12,
-    alignItems: "center",
-  },
-  rowFill: {
-    flex: 1,
-  },
-  primaryButton: {
-    minHeight: 54,
-    borderRadius: 8,
-    paddingHorizontal: 18,
-    alignItems: "center",
-    justifyContent: "center",
-    flexDirection: "row",
-    gap: 10,
-    backgroundColor: colors.ink,
-  },
-  primaryButtonText: {
-    color: colors.paper,
-    fontSize: 16,
-    fontWeight: "800",
-  },
-  secondaryButton: {
-    minHeight: 54,
-    borderRadius: 8,
-    paddingHorizontal: 16,
-    alignItems: "center",
-    justifyContent: "center",
-    flexDirection: "row",
-    gap: 8,
-    backgroundColor: colors.surface,
-    borderWidth: 1,
-    borderColor: colors.line,
-  },
-  secondaryButtonText: {
-    color: colors.ink,
-    fontSize: 15,
-    fontWeight: "800",
-  },
-  disabled: {
-    opacity: 0.45,
-  },
-  pressed: {
-    opacity: 0.72,
-  },
-  progressPanel: {
-    borderRadius: 8,
-    backgroundColor: colors.surface,
-    borderWidth: 1,
-    borderColor: colors.line,
-  },
-  artistRow: {
-    minHeight: 76,
-    padding: 14,
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 12,
-    borderBottomWidth: 1,
-    borderBottomColor: colors.line,
-  },
-  artistBadge: {
-    width: 44,
-    height: 44,
-    borderRadius: 8,
-    alignItems: "center",
-    justifyContent: "center",
-    backgroundColor: colors.gold,
-  },
-  artistNumber: {
-    fontSize: 17,
-    fontWeight: "900",
-    color: colors.ink,
-  },
-  artistName: {
-    fontSize: 16,
-    fontWeight: "800",
-    color: colors.ink,
-  },
-  sketchGrid: {
-    gap: 14,
-  },
-  sketchCard: {
-    minHeight: 272,
-    padding: 12,
-    borderRadius: 8,
-    backgroundColor: colors.surface,
-    borderWidth: 1,
-    borderColor: colors.line,
-    gap: 8,
-    overflow: "hidden",
-  },
-  sketchLabel: {
-    fontSize: 14,
-    fontWeight: "800",
-    color: colors.ink,
-  },
-  scorePanel: {
-    padding: 22,
-    borderRadius: 8,
-    backgroundColor: colors.ink,
-    gap: 8,
-  },
-  scoreNumber: {
-    fontSize: 60,
-    lineHeight: 66,
-    fontWeight: "900",
-    color: colors.gold,
-  },
-  scoreLabel: {
-    fontSize: 15,
-    fontWeight: "800",
-    color: colors.paper,
-  },
-  feedback: {
-    fontSize: 16,
-    lineHeight: 24,
-    color: "#F3F4F6",
-  },
-  resultLine: {
-    padding: 16,
-    borderRadius: 8,
-    backgroundColor: colors.surface,
-    borderWidth: 1,
-    borderColor: colors.line,
-    gap: 8,
-  },
-  resultText: {
-    fontSize: 17,
-    lineHeight: 24,
-    color: colors.ink,
-  },
-  tags: {
-    flexDirection: "row",
-    flexWrap: "wrap",
-    gap: 8,
-  },
-  tag: {
-    minHeight: 34,
-    paddingHorizontal: 10,
-    alignItems: "center",
-    justifyContent: "center",
-    borderRadius: 8,
-  },
-  tagMint: {
-    backgroundColor: "#DDF7EF",
-  },
-  tagCoral: {
-    backgroundColor: "#FFE0DD",
-  },
-  tagText: {
-    fontSize: 14,
-    fontWeight: "800",
-    color: colors.ink,
-  },
-});
+function friendlyGameLinkError(error: unknown) {
+  if (error instanceof ApiError && (error.status === 401 || error.status === 403)) {
+    return "This game is not available to the current profile.";
+  }
+  if (error instanceof ApiError && error.status === 404) return "This game no longer exists.";
+  return getErrorMessage(error);
+}

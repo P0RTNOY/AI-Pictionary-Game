@@ -5,24 +5,39 @@
   "main": "node_modules/expo/AppEntry.js",
   "scripts": {
     "start": "expo start",
-    "ios": "expo start --ios",
-    "android": "expo start --android",
+    "ios": "expo run:ios",
+    "android": "expo run:android",
     "web": "expo start --web",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "doctor": "expo-doctor",
+    "test:task5-lifecycle": "node scripts/test-task5-lifecycle.js",
+    "test:task4-lifecycle": "node scripts/test-task4-lifecycle.js",
+    "test:task3-security": "node scripts/test-task3-security.js"
   },
   "dependencies": {
-    "@expo/metro-config": "~54.0.14",
     "@expo/vector-icons": "^15.0.3",
-    "expo": "~54.0.0",
+    "@react-native-async-storage/async-storage": "2.2.0",
+    "expo": "~54.0.36",
     "expo-asset": "~12.0.13",
+    "expo-clipboard": "~8.0.8",
+    "expo-constants": "~18.0.13",
+    "expo-dev-client": "~6.0.21",
+    "expo-device": "~8.0.10",
+    "expo-font": "~14.0.12",
+    "expo-haptics": "~15.0.8",
+    "expo-notifications": "~0.32.17",
+    "expo-splash-screen": "~31.0.13",
     "expo-status-bar": "~3.0.9",
     "lucide-react-native": "^1.21.0",
     "react": "19.1.0",
+    "react-dom": "19.1.0",
     "react-native": "0.81.5",
-    "react-native-svg": "15.12.1"
+    "react-native-svg": "15.12.1",
+    "react-native-web": "^0.21.0"
   },
   "devDependencies": {
     "@types/react": "~19.1.10",
+    "expo-doctor": "1.20.1",
     "typescript": "~5.9.2"
   }
 }
