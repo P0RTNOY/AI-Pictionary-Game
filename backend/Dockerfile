@@ -7,6 +7,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app ./app
 COPY check_keys.py .
+COPY alembic.ini .
+COPY alembic ./alembic
 
 ENV DATABASE_URL=sqlite:////data/ai_pictionary.db
 ENV ENV=production DEBUG=false AUTO_CREATE_TABLES=false

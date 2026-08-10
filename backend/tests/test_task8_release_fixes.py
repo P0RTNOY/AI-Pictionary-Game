@@ -161,6 +161,13 @@ def test_device_token_migration_uses_revision_local_limit():
     assert "ACTIVE_DEVICE_TOKEN_LIMIT = 3" in source
 
 
+def test_backend_container_contains_explicit_migration_runtime():
+    dockerfile = (Path(__file__).parents[1] / "Dockerfile").read_text()
+    assert "COPY alembic.ini ." in dockerfile
+    assert "COPY alembic ./alembic" in dockerfile
+    assert "alembic upgrade head" not in dockerfile
+
+
 def test_reveal_clue_is_guesser_only_bounded_and_guess_ignores_client_count(db_session):
     creator, guesser, round_record = _ready_round(db_session)
 
