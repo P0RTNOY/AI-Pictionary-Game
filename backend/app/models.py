@@ -187,8 +187,21 @@ class GameInvitePreview(BaseModel):
     expires_at: str
 
 
+class InviteCodeRequest(BaseModel):
+    code: str = Field(min_length=16, max_length=64)
+
+
 class InviteJoin(BaseModel):
     user_id: Optional[str] = None
+
+
+class InviteJoinRequest(InviteCodeRequest):
+    user_id: Optional[str] = None
+
+
+class WebSocketTicket(BaseModel):
+    ticket: str
+    expires_at: str
 
 
 class DeviceTokenRegister(BaseModel):

@@ -24,6 +24,7 @@ from app.config import (
     INVITE_ATTEMPT_WINDOW_SECONDS,
     INVITE_RATE_LIMIT_MAX_SOURCES,
     PER_USER_DAILY_ROUND_LIMIT,
+    WEBSOCKET_TICKET_TTL_SECONDS,
 )
 from app.db import SessionLocal
 from app.models import (
@@ -50,6 +51,7 @@ from app.models import (
     UserCreate,
     UserSession,
     UserUpdate,
+    WebSocketTicket,
 )
 from app.notifications import get_notification_provider, notify_user
 from app.orm_models import DeviceToken as DeviceTokenORM
@@ -61,6 +63,7 @@ from app.orm_models import Guess as GuessORM
 from app.orm_models import NotificationAttempt as NotificationAttemptORM
 from app.orm_models import Round as RoundORM
 from app.orm_models import User as UserORM
+from app.orm_models import WebSocketTicket as WebSocketTicketORM
 from app.safety import validate_challenge_prompt
 
 
@@ -84,6 +87,63 @@ def new_id() -> str:
 
 def hash_access_token(access_token: str) -> str:
     return hashlib.sha256(access_token.encode("utf-8")).hexdigest()
+
+
+def issue_websocket_ticket(db: Session, game_id: str, user_id: str) -> WebSocketTicket:
+    game = db.get(GameORM, game_id)
+    if not game:
+        raise HTTPException(status_code=404, detail="Game not found")
+    require_game_participant(game, user_id)
+    raw_ticket = secrets.token_urlsafe(32)
+    expires_at = now() + timedelta(seconds=WEBSOCKET_TICKET_TTL_SECONDS)
+    db.add(
+        WebSocketTicketORM(
+            id=new_id(),
+            ticket_hash=hash_access_token(raw_ticket),
+            user_id=user_id,
+            game_id=game_id,
+            expires_at=expires_at,
+        )
+    )
+    db.commit()
+    return WebSocketTicket(ticket=raw_ticket, expires_at=serialize_dt(expires_at) or "")
+
+
+def consume_websocket_ticket(db: Session, raw_ticket: str, game_id: str) -> str:
+    consumed_at = now()
+    ticket_hash = hash_access_token(raw_ticket)
+    ticket = db.scalar(
+        select(WebSocketTicketORM).where(
+            WebSocketTicketORM.ticket_hash == ticket_hash,
+            WebSocketTicketORM.game_id == game_id,
+        )
+    )
+    if not ticket:
+        raise HTTPException(status_code=401, detail=AUTHENTICATION_ERROR)
+    transition = db.execute(
+        update(WebSocketTicketORM)
+        .where(
+            WebSocketTicketORM.id == ticket.id,
+            WebSocketTicketORM.consumed_at.is_(None),
+            WebSocketTicketORM.expires_at >= consumed_at,
+        )
+        .values(consumed_at=consumed_at)
+        .execution_options(synchronize_session=False)
+    )
+    if transition.rowcount != 1:
+        db.rollback()
+        raise HTTPException(status_code=401, detail=AUTHENTICATION_ERROR)
+    game = db.get(GameORM, game_id)
+    if not game:
+        db.rollback()
+        raise HTTPException(status_code=401, detail=AUTHENTICATION_ERROR)
+    try:
+        require_game_participant(game, ticket.user_id)
+    except HTTPException as exc:
+        db.rollback()
+        raise HTTPException(status_code=401, detail=AUTHENTICATION_ERROR) from exc
+    db.commit()
+    return ticket.user_id
 
 
 def authenticate_access_token(db: Session, access_token: str) -> UserORM:
@@ -762,6 +822,21 @@ def list_all_events(db: Session, limit: int = 100) -> list[GameEvent]:
     return [to_event_schema(event) for event in reversed(events)]
 
 
+def list_events_for_user(db: Session, user_id: str, limit: int = 100) -> list[GameEvent]:
+    events = (
+        db.execute(
+            select(GameEventORM)
+            .join(GameORM, GameORM.id == GameEventORM.game_id)
+            .where(or_(GameORM.player_1_id == user_id, GameORM.player_2_id == user_id))
+            .order_by(GameEventORM.id.desc())
+            .limit(limit)
+        )
+        .scalars()
+        .all()
+    )
+    return [to_event_schema(event) for event in reversed(events)]
+
+
 def list_all_games(db: Session, limit: int = 100) -> list[Game]:
     games = db.execute(select(GameORM).order_by(GameORM.updated_at.desc()).limit(limit)).scalars().all()
     return [to_game_schema(db, game) for game in games]
@@ -769,6 +844,33 @@ def list_all_games(db: Session, limit: int = 100) -> list[Game]:
 
 def list_notification_attempts(db: Session, limit: int = 100) -> list[dict[str, Any]]:
     attempts = db.execute(select(NotificationAttemptORM).order_by(NotificationAttemptORM.created_at.desc()).limit(limit)).scalars().all()
+    return [
+        {
+            "id": attempt.id,
+            "user_id": attempt.user_id,
+            "device_token_id": attempt.device_token_id,
+            "provider": attempt.provider,
+            "title": attempt.title,
+            "status": attempt.status,
+            "response": json.loads(attempt.response_json or "{}"),
+            "error_message": attempt.error_message,
+            "created_at": serialize_dt(attempt.created_at),
+        }
+        for attempt in attempts
+    ]
+
+
+def list_notification_attempts_for_user(db: Session, user_id: str, limit: int = 100) -> list[dict[str, Any]]:
+    attempts = (
+        db.execute(
+            select(NotificationAttemptORM)
+            .where(NotificationAttemptORM.user_id == user_id)
+            .order_by(NotificationAttemptORM.created_at.desc())
+            .limit(limit)
+        )
+        .scalars()
+        .all()
+    )
     return [
         {
             "id": attempt.id,
@@ -1007,7 +1109,7 @@ def refresh_invite_expiry(db: Session, invite: GameInviteORM) -> None:
 
 def generate_invite_code(db: Session) -> str:
     for _ in range(20):
-        code = secrets.token_urlsafe(24)
+        code = secrets.token_urlsafe(16)
         if not db.get(GameInviteORM, code):
             return code
     raise HTTPException(status_code=503, detail="Could not create an invite")
@@ -1180,3 +1282,32 @@ def to_device_token_schema(token: DeviceTokenORM) -> DeviceToken:
         created_at=serialize_dt(token.created_at) or "",
         updated_at=serialize_dt(token.updated_at) or "",
     )
+
+
+def reset_local_database(db: Session) -> dict[str, int]:
+    """
+    Deletes all records from the local database in an order that respects foreign keys.
+    Returns a dictionary of deleted row counts by table.
+    """
+    tables_to_delete = [
+        ("websocket_tickets", WebSocketTicketORM),
+        ("notification_attempts", NotificationAttemptORM),
+        ("device_tokens", DeviceTokenORM),
+        ("generated_svgs", GeneratedSvgORM),
+        ("guesses", GuessORM),
+        ("game_events", GameEventORM),
+        ("rounds", RoundORM),
+        ("game_invites", GameInviteORM),
+        ("games", GameORM),
+        ("users", UserORM),
+    ]
+
+    deleted_counts = {}
+    for table_name, model in tables_to_delete:
+        from sqlalchemy import delete
+        result = db.execute(delete(model))
+        deleted_counts[table_name] = result.rowcount
+
+    db.commit()
+    logger.info("database.reset_local_data", extra={"deleted": deleted_counts})
+    return deleted_counts

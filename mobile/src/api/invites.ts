@@ -9,12 +9,15 @@ export function createInvite(): Promise<GameInvite> {
 }
 
 export function getInvite(code: string): Promise<GameInvitePreview> {
-  return apiFetch<GameInvitePreview>(`/invites/${encodeURIComponent(code)}`);
+  return apiFetch<GameInvitePreview>("/invites/preview", {
+    method: "POST",
+    body: JSON.stringify({ code }),
+  });
 }
 
 export function joinInvite(code: string): Promise<Game> {
-  return apiFetch<Game>(`/invites/${encodeURIComponent(code)}/join`, {
+  return apiFetch<Game>("/invites/join", {
     method: "POST",
-    body: JSON.stringify({}),
+    body: JSON.stringify({ code }),
   });
 }

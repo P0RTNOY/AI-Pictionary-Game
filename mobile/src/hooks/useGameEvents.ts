@@ -1,12 +1,13 @@
 import { useEffect, useRef, useState } from "react";
-import { API_URL, getApiCredential } from "../api/client";
+import { API_URL } from "../api/client";
 import { listEvents } from "../api/games";
+import { createWebSocketTicket } from "../api/websocketTickets";
 import type { GameEvent } from "../types/game";
 import { captureError, captureMessage } from "../utils/errorReporter";
 
-function wsUrl(gameId: string, accessToken: string, afterId: number) {
+function wsUrl(gameId: string, ticket: string, afterId: number) {
   const base = API_URL.replace(/^http/, "ws");
-  return `${base}/ws/games/${gameId}?access_token=${encodeURIComponent(accessToken)}&after_id=${afterId}`;
+  return `${base}/ws/games/${gameId}?ticket=${encodeURIComponent(ticket)}&after_id=${afterId}`;
 }
 
 export function useGameEvents({
@@ -27,10 +28,8 @@ export function useGameEvents({
   const reconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
-    const accessToken = getApiCredential();
-    if (!enabled || !gameId || !accessToken) return;
+    if (!enabled || !gameId) return;
     const activeGameId = gameId;
-    const activeAccessToken = accessToken;
     let socket: WebSocket | null = null;
     let closed = false;
     let failures = 0;
@@ -47,8 +46,24 @@ export function useGameEvents({
       if (fresh.length) onEvents(fresh);
     }
 
-    function connect() {
-      socket = new WebSocket(wsUrl(activeGameId, activeAccessToken, lastId.current));
+    function scheduleReconnect() {
+      if (closed) return;
+      reconnectTimer.current = setTimeout(connect, Math.min(1000 * (failures + 1), 5000));
+    }
+
+    async function connect() {
+      try {
+        const issued = await createWebSocketTicket(activeGameId);
+        if (closed) return;
+        socket = new WebSocket(wsUrl(activeGameId, issued.ticket, lastId.current));
+      } catch (error) {
+        failures += 1;
+        setConnected(false);
+        if (failures >= 2) setFallbackPolling(true);
+        captureError(error, { area: "websocket_ticket", gameId: activeGameId, failures });
+        scheduleReconnect();
+        return;
+      }
       socket.onopen = () => {
         failures = 0;
         setConnected(true);
@@ -70,7 +85,7 @@ export function useGameEvents({
         setConnected(false);
         if (closed) return;
         if (failures >= 2) setFallbackPolling(true);
-        reconnectTimer.current = setTimeout(connect, Math.min(1000 * (failures + 1), 5000));
+        scheduleReconnect();
       };
     }
 

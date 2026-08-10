@@ -48,24 +48,17 @@ export function CreateRoundScreen({
     }
     setLoading(true);
     const finalPrompt = prompt.trim();
-    console.log("CreateRoundScreen - Builder Parts:", parts);
-    console.log("CreateRoundScreen - Manual Prompt Text:", prompt);
-    console.log("CreateRoundScreen - Final Prompt:", finalPrompt);
-    console.log("CreateRoundScreen - POST payload:", { game_id: game.id, creator_user_id: userId, prompt: finalPrompt });
-    captureMessage("Round prompt submitted", { area: "round_create", gameId: game.id, creatorUserId: userId, finalPrompt });
+    captureMessage("Round prompt submitted", { area: "round_create", gameId: game.id, creatorUserId: userId });
     try {
       const round = await createRound(game.id, finalPrompt);
-      console.log("CreateRoundScreen - Created Round ID:", round.id);
-      console.log("CreateRoundScreen - Created Round Original Prompt:", round.original_prompt);
       captureMessage("Round created from prompt", {
         area: "round_create",
         roundId: round.id,
         gameId: game.id,
-        returnedPrompt: round.original_prompt,
       });
       onCreated(round);
     } catch (error) {
-      captureError(error, { area: "round_create", gameId: game.id, creatorUserId: userId, finalPrompt });
+      captureError(error, { area: "round_create", gameId: game.id, creatorUserId: userId });
       Alert.alert("Could not create round", error instanceof Error ? error.message : "Unknown error");
     } finally {
       setLoading(false);
@@ -106,9 +99,6 @@ export function CreateRoundScreen({
           placeholder="a giraffe teaching a dolphin piano"
           placeholderTextColor={colors.muted}
         />
-      </View>
-      <View style={styles.fieldGroup}>
-        <Text style={[styles.mutedText, { fontStyle: "italic", fontSize: 13 }]}>Submitting prompt: {prompt.trim()}</Text>
       </View>
       <View style={styles.row}>
         <SecondaryButton label="Random all" icon={<RefreshCw size={18} color={colors.ink} />} onPress={randomizeAll} />

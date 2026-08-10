@@ -60,7 +60,11 @@ def test_expo_push_provider_uses_expo_endpoint(monkeypatch):
 
 def test_debug_endpoints_enabled_in_development():
     client = TestClient(app)
-    response = client.get("/debug/health/full")
+    session = client.post("/users", json={"display_name": "Debug Health"}).json()
+    response = client.get(
+        "/debug/health/full",
+        headers={"Authorization": f"Bearer {session['access_token']}"},
+    )
     assert response.status_code == 200
     assert response.json()["status"] == "ok"
 
@@ -75,14 +79,16 @@ def test_environment_config_helpers_are_safe_by_default():
 
 
 def test_debug_test_notification_endpoint_is_debug_only(monkeypatch, db_session):
-    player = services.create_user(db_session, UserCreate(display_name="Push Tester"))
+    session = services.create_user_session(db_session, UserCreate(display_name="Push Tester"))
+    player = session.user
+    headers = {"Authorization": f"Bearer {session.access_token}"}
     client = TestClient(app)
-    response = client.post("/debug/send-test-notification", json={"user_id": player.id})
+    response = client.post("/debug/send-test-notification", headers=headers, json={"user_id": player.id})
     assert response.status_code == 200
     assert response.json()["queued"] is True
 
     monkeypatch.setattr("app.main.DEBUG", False)
-    disabled = client.post("/debug/send-test-notification", json={"user_id": player.id})
+    disabled = client.post("/debug/send-test-notification", headers=headers, json={"user_id": player.id})
     assert disabled.status_code == 404
     monkeypatch.setattr("app.main.DEBUG", True)
 
@@ -90,3 +96,49 @@ def test_debug_test_notification_endpoint_is_debug_only(monkeypatch, db_session)
 def test_prompt_safety_blocks_markup_payloads():
     with pytest.raises(HTTPException):
         validate_challenge_prompt("<script>alert(1)</script>")
+
+
+def test_debug_reset_endpoint_clears_data(db_session):
+    # Populate data
+    from app.models import GameCreate
+    session = services.create_user_session(db_session, UserCreate(display_name="QA Tester 1"))
+    player1 = session.user
+    player2 = services.create_user(db_session, UserCreate(display_name="QA Tester 2"))
+    game = services.create_game(db_session, GameCreate(player_1_id=player1.id, player_2_id=player2.id))
+
+    # Assert data exists
+    assert len(services.list_all_games(db_session)) > 0
+
+    # Call endpoint
+    client = TestClient(app)
+    response = client.post(
+        "/debug/reset-local-data",
+        headers={"Authorization": f"Bearer {session.access_token}"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["ok"] is True
+    assert "users" in response.json()["deleted"]
+
+    # Assert data is gone
+    assert len(services.list_all_games(db_session)) == 0
+
+    # Verify we can recreate after reset
+    new_player_1 = services.create_user(db_session, UserCreate(display_name="QA Tester 1"))
+    new_player_2 = services.create_user(db_session, UserCreate(display_name="QA Tester 2"))
+    new_game = services.create_game(db_session, GameCreate(player_1_id=new_player_1.id, player_2_id=new_player_2.id))
+    from app.models import GameRoundCreate
+    new_round = services.create_round_for_game(db_session, new_game.id, GameRoundCreate(prompt="test prompt after reset", creator_user_id=new_player_1.id))
+    assert new_round.original_prompt == "test prompt after reset"
+
+
+def test_debug_reset_endpoint_blocked_in_production(monkeypatch, db_session):
+    session = services.create_user_session(db_session, UserCreate(display_name="Production Debug"))
+    client = TestClient(app)
+    monkeypatch.setattr("app.main.DEBUG", False)
+    response = client.post(
+        "/debug/reset-local-data",
+        headers={"Authorization": f"Bearer {session.access_token}"},
+    )
+    assert response.status_code == 404
+    monkeypatch.setattr("app.main.DEBUG", True)

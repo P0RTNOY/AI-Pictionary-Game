@@ -10,17 +10,19 @@ export function GamePendingScreen({
   error,
   onRetry,
   onHome,
+  errorTitle,
 }: {
   game: Game | null;
   loading?: boolean;
   error?: string | null;
   onRetry: () => void;
   onHome: () => void;
+  errorTitle?: string;
 }) {
   return (
     <ScrollView contentContainerStyle={styles.content}>
       <View style={styles.panel}>
-        <Text style={styles.sectionTitle}>{error ? "Could not open game" : "Waiting for first prompt"}</Text>
+        <Text style={styles.sectionTitle}>{error ? errorTitle || "Could not open game" : "Waiting for first prompt"}</Text>
         <Text style={styles.mutedText}>
           {error
             ? error

@@ -31,7 +31,9 @@ from app.models import (
     GuessCreate,
     GuessResult,
     InviteCreate,
+    InviteCodeRequest,
     InviteJoin,
+    InviteJoinRequest,
     RetryGenerationRequest,
     Round,
     RoundCreate,
@@ -41,6 +43,7 @@ from app.models import (
     UserCreate,
     UserSession,
     UserUpdate,
+    WebSocketTicket as WebSocketTicketSchema,
 )
 from app import services
 from app.orm_models import User as UserORM
@@ -109,8 +112,7 @@ def health() -> dict[str, str]:
 
 
 def require_debug() -> None:
-    if ENV == "production" or not DEBUG:
-        raise HTTPException(status_code=404, detail="Not found")
+    require_local_debug()
 
 
 def require_local_debug() -> None:
@@ -146,38 +148,51 @@ def ai_status() -> dict:
 
 
 @app.get("/debug/health/full")
-def debug_health_full(db: Session = Depends(get_db)) -> dict:
+def debug_health_full(actor: UserORM = Depends(current_user), db: Session = Depends(get_db)) -> dict:
     require_debug()
     return {"status": "ok", "env": ENV, "ai": get_ai_status(), "database": "ok"}
 
 
 @app.get("/debug/events")
-def debug_events(limit: int = 100, db: Session = Depends(get_db)) -> list[GameEvent]:
+def debug_events(limit: int = 100, actor: UserORM = Depends(current_user), db: Session = Depends(get_db)) -> list[GameEvent]:
     require_debug()
-    return services.list_all_events(db, limit=limit)
+    return services.list_events_for_user(db, actor.id, limit=limit)
 
 
 @app.get("/debug/games")
-def debug_games(limit: int = 100, db: Session = Depends(get_db)) -> list[Game]:
+def debug_games(limit: int = 100, actor: UserORM = Depends(current_user), db: Session = Depends(get_db)) -> list[Game]:
     require_debug()
-    return services.list_all_games(db, limit=limit)
+    return services.list_games_for_user(db, actor.id)[:limit]
 
 
 @app.get("/debug/notification-outbox")
-def debug_notification_outbox(limit: int = 100, db: Session = Depends(get_db)) -> dict:
+def debug_notification_outbox(limit: int = 100, actor: UserORM = Depends(current_user), db: Session = Depends(get_db)) -> dict:
     require_debug()
     from app.notifications import NOTIFICATION_OUTBOX
 
     return {
-        "outbox": [message.__dict__ for message in NOTIFICATION_OUTBOX[-limit:]],
-        "attempts": services.list_notification_attempts(db, limit=limit),
+        "outbox": [message.__dict__ for message in NOTIFICATION_OUTBOX if message.user_id == actor.id][-limit:],
+        "attempts": services.list_notification_attempts_for_user(db, actor.id, limit=limit),
     }
 
 
 @app.post("/debug/send-test-notification", response_model=TestNotificationResponse)
-def debug_send_test_notification(payload: TestNotificationRequest, db: Session = Depends(get_db)) -> TestNotificationResponse:
+def debug_send_test_notification(payload: TestNotificationRequest, actor: UserORM = Depends(current_user), db: Session = Depends(get_db)) -> TestNotificationResponse:
     require_debug()
-    return services.send_debug_test_notification(db, payload.user_id, game_id=payload.game_id)
+    services.assert_actor_matches(payload.user_id, actor.id)
+    if payload.game_id:
+        game = db.get(services.GameORM, payload.game_id)
+        if not game:
+            raise HTTPException(status_code=404, detail="Game not found")
+        services.require_game_participant(game, actor.id)
+    return services.send_debug_test_notification(db, actor.id, game_id=payload.game_id)
+
+
+@app.post("/debug/reset-local-data")
+def debug_reset_local_data(actor: UserORM = Depends(current_user), db: Session = Depends(get_db)) -> dict:
+    require_debug()
+    deleted = services.reset_local_database(db)
+    return {"deleted": deleted, "ok": True}
 
 
 @app.post("/users", response_model=UserSession, status_code=201)
@@ -269,23 +284,40 @@ def create_invite(
     return services.create_invite(db, payload.model_copy(update={"creator_user_id": actor.id}))
 
 
-@app.get("/invites/{code}", response_model=GameInvitePreview)
-def get_invite(code: str, request: Request, db: Session = Depends(get_db)) -> GameInvitePreview:
+@app.post("/invites/preview", response_model=GameInvitePreview)
+def preview_invite(payload: InviteCodeRequest, request: Request, db: Session = Depends(get_db)) -> GameInvitePreview:
     services.check_invite_attempt(invite_attempt_source(request))
-    return services.get_invite_preview(db, code)
+    return services.get_invite_preview(db, payload.code)
 
 
-@app.post("/invites/{code}/join", response_model=Game, status_code=201)
+@app.post("/invites/join", response_model=Game, status_code=201)
 def join_invite(
-    code: str,
-    payload: InviteJoin,
+    payload: InviteJoinRequest,
     request: Request,
     actor: UserORM = Depends(current_user),
     db: Session = Depends(get_db),
 ) -> Game:
     services.check_invite_attempt(invite_attempt_source(request))
     services.assert_actor_matches(payload.user_id, actor.id)
-    return services.join_invite(db, code, payload.model_copy(update={"user_id": actor.id}))
+    return services.join_invite(db, payload.code, InviteJoin(user_id=actor.id))
+
+
+@app.get("/invites/{code}", response_model=GameInvitePreview, dependencies=[Depends(require_local_debug)])
+def get_invite_legacy(code: str, request: Request, actor: UserORM = Depends(current_user), db: Session = Depends(get_db)) -> GameInvitePreview:
+    services.check_invite_attempt(invite_attempt_source(request))
+    return services.get_invite_preview(db, code)
+
+
+@app.post("/invites/{code}/join", response_model=Game, status_code=201, dependencies=[Depends(require_local_debug)])
+def join_invite_legacy(code: str, payload: InviteJoin, request: Request, actor: UserORM = Depends(current_user), db: Session = Depends(get_db)) -> Game:
+    services.check_invite_attempt(invite_attempt_source(request))
+    services.assert_actor_matches(payload.user_id, actor.id)
+    return services.join_invite(db, code, InviteJoin(user_id=actor.id))
+
+
+@app.post("/games/{game_id}/websocket-ticket", response_model=WebSocketTicketSchema, status_code=201)
+def create_websocket_ticket(game_id: str, actor: UserORM = Depends(current_user), db: Session = Depends(get_db)) -> WebSocketTicketSchema:
+    return services.issue_websocket_ticket(db, game_id, actor.id)
 
 
 @app.post("/device-tokens", response_model=DeviceToken, status_code=201)
@@ -376,8 +408,8 @@ async def guess_round(
 
 @app.websocket("/ws/games/{game_id}")
 async def game_events_websocket(websocket: WebSocket, game_id: str) -> None:
-    access_token = websocket.query_params.get("access_token")
-    if not access_token:
+    ticket = websocket.query_params.get("ticket")
+    if not ticket:
         await websocket.close(code=1008)
         return
     try:
@@ -387,12 +419,7 @@ async def game_events_websocket(websocket: WebSocket, game_id: str) -> None:
         return
     try:
         with services.SessionLocal() as db:
-            actor = services.authenticate_access_token(db, access_token)
-            game = db.get(services.GameORM, game_id)
-            if not game:
-                raise HTTPException(status_code=404, detail="Game not found")
-            services.require_game_participant(game, actor.id)
-            user_id = actor.id
+            user_id = services.consume_websocket_ticket(db, ticket, game_id)
     except HTTPException:
         await websocket.close(code=1008)
         return

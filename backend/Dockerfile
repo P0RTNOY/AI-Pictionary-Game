@@ -11,4 +11,4 @@ COPY check_keys.py .
 ENV DATABASE_URL=sqlite:////data/ai_pictionary.db
 EXPOSE 8000
 
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--no-access-log"]

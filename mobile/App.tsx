@@ -25,8 +25,9 @@ import type { Game, GameStats, GuessResult, Round, User } from "./src/types/game
 import { appDiagnostics } from "./src/config";
 import { parseInviteCodeFromUrl } from "./src/utils/deepLinks";
 import { captureError, captureMessage } from "./src/utils/errorReporter";
+import { decideSessionBootstrap } from "./src/sessionBootstrap";
 
-type Screen = "onboarding" | "home" | "profile_setup" | "edit_profile" | "invites" | "create_round" | "waiting" | "guess" | "result" | "debug";
+type Screen = "onboarding" | "home" | "profile_setup" | "edit_profile" | "invites" | "create_round" | "waiting" | "guess" | "result" | "debug" | "startup_error";
 
 const USER_ID_KEY = "ai-pictionary:user-id";
 const SESSION_TOKEN_KEY = "ai-pictionary:session-token";
@@ -48,6 +49,8 @@ export default function App() {
   const [selectedGameLoading, setSelectedGameLoading] = useState(false);
   const [aiStatus, setAIStatus] = useState<AIStatus | null>(null);
   const [refreshing, setRefreshing] = useState(false);
+  const [startupError, setStartupError] = useState<string | null>(null);
+  const [startupLoading, setStartupLoading] = useState(false);
   const lastHandledUrl = useRef<string | null>(null);
 
   useEffect(() => {
@@ -132,30 +135,47 @@ export default function App() {
   const selectedLatestRound = useMemo(() => selectedRound ?? selectedGame?.latest_round ?? null, [selectedGame, selectedRound]);
 
   async function ensureLocalUser() {
-    const onboardingDone = await AsyncStorage.getItem(ONBOARDING_KEY);
+    setStartupLoading(true);
+    setStartupError(null);
+    let onboardingDone: string | null = null;
+    let storedId: string | null = null;
+    let storedToken: string | null = null;
     try {
-      const [storedId, storedToken] = await Promise.all([
+      [storedId, storedToken, onboardingDone] = await Promise.all([
         AsyncStorage.getItem(USER_ID_KEY),
         AsyncStorage.getItem(SESSION_TOKEN_KEY),
+        AsyncStorage.getItem(ONBOARDING_KEY),
       ]);
-      if (storedId && storedToken) {
-        configureApiCredential(storedToken);
-        const existing = await getUser(storedId);
-        setUser(existing);
-        return;
-      }
-      if (storedId || storedToken) await clearStoredSession();
-      setScreen(onboardingDone ? "profile_setup" : "onboarding");
-      return;
     } catch (error) {
-      if (isUnauthorizedError(error)) {
-        await clearStoredSession();
-        setScreen(onboardingDone ? "profile_setup" : "onboarding");
-        return;
-      }
+      setStartupError(getErrorMessage(error));
+      setScreen("startup_error");
+      setStartupLoading(false);
+      return;
     }
 
-    setScreen("onboarding");
+    if (decideSessionBootstrap(Boolean(storedId), Boolean(storedToken)) === "reonboard") {
+      if (storedId || storedToken) await clearStoredSession();
+      setScreen(onboardingDone ? "profile_setup" : "onboarding");
+      setStartupLoading(false);
+      return;
+    }
+
+    configureApiCredential(storedToken);
+    try {
+      const existing = await getUser(storedId!);
+      setUser(existing);
+    } catch (error) {
+      const failure = isUnauthorizedError(error) ? "unauthorized" : "transient";
+      if (decideSessionBootstrap(true, true, failure) === "reonboard") {
+        await clearStoredSession();
+        setScreen(onboardingDone ? "profile_setup" : "onboarding");
+        setStartupLoading(false);
+        return;
+      }
+      setStartupError(getErrorMessage(error));
+      setScreen("startup_error");
+    }
+    setStartupLoading(false);
   }
 
   async function clearStoredSession() {
@@ -363,6 +383,16 @@ export default function App() {
               setUser(session.user);
               setScreen(pendingInviteCode ? "invites" : "home");
             }}
+          />
+        )}
+        {screen === "startup_error" && (
+          <GamePendingScreen
+            game={null}
+            loading={startupLoading}
+            error={startupError || "The backend is unavailable. Your saved session is still on this device."}
+            errorTitle="Could not restore your session"
+            onRetry={ensureLocalUser}
+            onHome={ensureLocalUser}
           />
         )}
         {user && screen === "edit_profile" && (

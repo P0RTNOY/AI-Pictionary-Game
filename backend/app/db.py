@@ -57,8 +57,36 @@ def _apply_sqlite_light_migrations(bind=engine) -> None:
         if "provider_used" not in existing:
             statements.append("ALTER TABLE generated_svgs ADD COLUMN provider_used VARCHAR(40)")
     if "guesses" in inspector.get_table_names():
+        statements.extend(
+            [
+                "CREATE TABLE IF NOT EXISTS task3_guess_conflict_archive ("
+                "id VARCHAR(64) PRIMARY KEY, round_id VARCHAR(64) NOT NULL, user_id VARCHAR(64) NOT NULL, "
+                "guess_text TEXT NOT NULL, score INTEGER NOT NULL, judge_result_json TEXT NOT NULL, "
+                "component_scores_json TEXT NOT NULL, clue_count_used INTEGER NOT NULL, "
+                "created_at DATETIME NOT NULL, updated_at DATETIME NOT NULL)",
+                "INSERT OR IGNORE INTO task3_guess_conflict_archive "
+                "(id, round_id, user_id, guess_text, score, judge_result_json, component_scores_json, "
+                "clue_count_used, created_at, updated_at) "
+                "SELECT id, round_id, user_id, guess_text, score, judge_result_json, component_scores_json, "
+                "clue_count_used, created_at, updated_at FROM ("
+                "SELECT guesses.*, ROW_NUMBER() OVER (PARTITION BY round_id ORDER BY created_at ASC, id ASC) task3_rank "
+                "FROM guesses) ranked WHERE task3_rank > 1",
+                "DELETE FROM guesses WHERE id IN (SELECT id FROM task3_guess_conflict_archive)",
+            ]
+        )
         statements.append("CREATE UNIQUE INDEX IF NOT EXISTS uq_guesses_round_id ON guesses (round_id)")
     if "rounds" in inspector.get_table_names():
+        statements.extend(
+            [
+                "CREATE TABLE IF NOT EXISTS task3_active_round_archive ("
+                "round_id VARCHAR(64) PRIMARY KEY, original_status VARCHAR(40) NOT NULL)",
+                "INSERT OR IGNORE INTO task3_active_round_archive (round_id, original_status) "
+                "SELECT id, status FROM (SELECT id, status, ROW_NUMBER() OVER ("
+                "PARTITION BY game_id ORDER BY created_at ASC, id ASC) task3_rank FROM rounds "
+                "WHERE status IN ('generating', 'ready_to_guess')) ranked WHERE task3_rank > 1",
+                "UPDATE rounds SET status = 'failed' WHERE id IN (SELECT round_id FROM task3_active_round_archive)",
+            ]
+        )
         statements.append(
             "CREATE UNIQUE INDEX IF NOT EXISTS uq_rounds_one_active_per_game ON rounds (game_id) "
             "WHERE status IN ('generating', 'ready_to_guess')"

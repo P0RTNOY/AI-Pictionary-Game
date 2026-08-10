@@ -44,6 +44,18 @@ class Game(TimestampMixin, Base):
     events: Mapped[list["GameEvent"]] = relationship(back_populates="game", cascade="all, delete-orphan")
 
 
+class WebSocketTicket(Base):
+    __tablename__ = "websocket_tickets"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    ticket_hash: Mapped[str] = mapped_column(String(64), nullable=False, unique=True, index=True)
+    user_id: Mapped[str] = mapped_column(String(64), ForeignKey("users.id"), nullable=False, index=True)
+    game_id: Mapped[str] = mapped_column(String(64), ForeignKey("games.id"), nullable=False, index=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    consumed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
+
+
 class GameInvite(TimestampMixin, Base):
     __tablename__ = "game_invites"
 

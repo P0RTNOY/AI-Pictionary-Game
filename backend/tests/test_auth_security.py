@@ -211,9 +211,9 @@ def test_forged_actor_fields_cannot_authorize_mutations(client, db_session):
 
     invite = services.create_invite(db_session, InviteCreate(creator_user_id=creator["id"]))
     forged_join = client.post(
-        f"/invites/{invite.code}/join",
+        "/invites/join",
         headers=bearer(stranger_token),
-        json={"user_id": guesser["id"]},
+        json={"code": invite.code, "user_id": guesser["id"]},
     )
     assert forged_join.status_code == 403
 
@@ -262,19 +262,22 @@ def test_retry_is_creator_only_and_guess_is_guesser_only(client, db_session):
     assert denied_guess.status_code == 403
 
 
-def test_websocket_rejects_missing_invalid_and_nonparticipant_tokens_before_accept(client, db_session):
+def test_websocket_rejects_missing_invalid_and_nonparticipant_tickets_before_accept(client, db_session):
     creator, creator_token = onboard(client, "Creator")
     guesser, _ = onboard(client, "Guesser")
     _, stranger_token = onboard(client, "Stranger")
     game = services.create_game(db_session, GameCreate(player_1_id=creator["id"], player_2_id=guesser["id"]))
 
-    for query in ("", "?access_token=invalid", f"?access_token={stranger_token}"):
+    for query in ("", "?ticket=invalid"):
         with pytest.raises(WebSocketDisconnect) as rejected:
             with client.websocket_connect(f"/ws/games/{game.id}{query}"):
                 pass
         assert rejected.value.code == 1008
 
-    with client.websocket_connect(f"/ws/games/{game.id}?access_token={creator_token}") as websocket:
+    assert client.post(f"/games/{game.id}/websocket-ticket", headers=bearer(stranger_token)).status_code == 403
+    ticket_response = client.post(f"/games/{game.id}/websocket-ticket", headers=bearer(creator_token))
+    assert ticket_response.status_code == 201
+    with client.websocket_connect(f"/ws/games/{game.id}?ticket={ticket_response.json()['ticket']}") as websocket:
         assert websocket.receive_json()["type"] == "connected"
 
 
@@ -314,7 +317,7 @@ def test_invite_preview_is_minimal_and_code_has_high_entropy(client):
     full_invite = created.json()
     assert len(full_invite["code"]) >= 22
 
-    preview = client.get(f"/invites/{full_invite['code']}")
+    preview = client.post("/invites/preview", json={"code": full_invite["code"]})
     assert preview.status_code == 200
     assert set(preview.json()) == {"code", "creator_user_id", "status", "expires_at"}
 
@@ -326,9 +329,13 @@ def test_invite_lookup_and_join_attempts_share_a_source_bound(monkeypatch, clien
     if reset:
         reset()
 
-    assert client.get("/invites/missing-one").status_code == 404
-    assert client.get("/invites/missing-two", headers={"X-Forwarded-For": "203.0.113.9"}).status_code == 404
-    limited = client.get("/invites/missing-three", headers={"X-Forwarded-For": "198.51.100.7"})
+    assert client.post("/invites/preview", json={"code": "missing-one-code"}).status_code == 404
+    assert client.post(
+        "/invites/preview", json={"code": "missing-two-code"}, headers={"X-Forwarded-For": "203.0.113.9"}
+    ).status_code == 404
+    limited = client.post(
+        "/invites/preview", json={"code": "missing-three-code"}, headers={"X-Forwarded-For": "198.51.100.7"}
+    )
 
     assert limited.status_code == 429
     assert limited.json() == {"detail": {"code": "invite_rate_limited", "message": "Too many invite attempts"}}
