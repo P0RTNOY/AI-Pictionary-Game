@@ -109,6 +109,7 @@ class GeneratedSvg(TimestampMixin, Base):
     sort_order: Mapped[int] = mapped_column(Integer, nullable=False)
     model_name: Mapped[str] = mapped_column(String(160), nullable=False)
     model_tier: Mapped[str] = mapped_column(String(40), nullable=False)
+    provider_used: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
     svg_text: Mapped[Optional[str]] = mapped_column(Text)
     generation_time_seconds: Mapped[Optional[float]]
     status: Mapped[str] = mapped_column(String(40), default="pending", nullable=False)

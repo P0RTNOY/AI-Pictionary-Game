@@ -52,6 +52,8 @@ from app.safety import validate_challenge_prompt
 
 
 logger = logging.getLogger("ai_pictionary.services")
+PUBLIC_GENERATION_ERROR_CODE = "generation_failed"
+PUBLIC_GENERATION_ERROR_MESSAGE = "Drawing generation failed. Please try again."
 
 
 def now() -> datetime:
@@ -244,7 +246,6 @@ def create_round_for_game(
             "round_id": round_record.id,
             "game_id": game.id,
             "creator_user_id": payload.creator_user_id,
-            "original_prompt": round_record.original_prompt,
         },
     )
 
@@ -273,8 +274,6 @@ def create_round_for_game(
 
 
 async def generate_round_svgs(round_id: str) -> None:
-    provider = get_ai_provider()
-    provider_name = getattr(provider, "name", provider.__class__.__name__)
     with SessionLocal() as db:
         round_record = load_round_orm(db, round_id)
         logger.info(
@@ -283,16 +282,31 @@ async def generate_round_svgs(round_id: str) -> None:
                 "round_id": round_id,
                 "game_id": round_record.game_id,
                 "creator_user_id": round_record.creator_user_id,
-                "original_prompt": round_record.original_prompt,
-                "provider": provider_name,
             },
         )
         add_event(db, round_record.game_id, "round.generation_started", {"round_id": round_id})
         db.commit()
 
+        try:
+            provider = get_ai_provider()
+        except Exception as exc:
+            logger.warning(
+                "generation.provider_initialization_failed",
+                extra={
+                    "round_id": round_id,
+                    "game_id": round_record.game_id,
+                    "exception_type": qualified_exception_type(exc),
+                },
+            )
+            finalize_provider_initialization_failure(db, round_record)
+            db.commit()
+            return
+
+        provider_name = getattr(provider, "name", provider.__class__.__name__)
         for svg in round_record.generated_svgs:
             if svg.status == SvgStatus.done.value:
                 continue
+            svg.provider_used = provider_name
             svg.status = SvgStatus.generating.value
             svg.attempts += 1
             db.commit()
@@ -333,7 +347,7 @@ async def generate_round_svgs(round_id: str) -> None:
                 )
             except Exception as exc:
                 svg.status = SvgStatus.failed.value
-                svg.error_message = str(exc)
+                svg.error_message = PUBLIC_GENERATION_ERROR_MESSAGE
                 svg.generation_time_seconds = round(time.perf_counter() - started, 2)
                 logger.warning(
                     "generation.svg_failed",
@@ -342,14 +356,21 @@ async def generate_round_svgs(round_id: str) -> None:
                         "game_id": round_record.game_id,
                         "svg_id": svg.id,
                         "tier": svg.model_tier,
-                        "error": str(exc),
+                        "provider": provider_name,
+                        "exception_type": qualified_exception_type(exc),
                     },
                 )
                 add_event(
                     db,
                     round_record.game_id,
                     "svg.failed",
-                    {"round_id": round_id, "svg_id": svg.id, "tier": svg.model_tier, "error": str(exc)},
+                    {
+                        "round_id": round_id,
+                        "svg_id": svg.id,
+                        "tier": svg.model_tier,
+                        "code": PUBLIC_GENERATION_ERROR_CODE,
+                        "message": PUBLIC_GENERATION_ERROR_MESSAGE,
+                    },
                 )
             db.commit()
 
@@ -360,7 +381,18 @@ async def generate_round_svgs(round_id: str) -> None:
             db,
             round_record.game_id,
             "round.ready_to_guess" if done_count else "round.failed",
-            {"round_id": round_id, "available_svgs": done_count},
+            {
+                "round_id": round_id,
+                "available_svgs": done_count,
+                **(
+                    {
+                        "code": PUBLIC_GENERATION_ERROR_CODE,
+                        "message": PUBLIC_GENERATION_ERROR_MESSAGE,
+                    }
+                    if not done_count
+                    else {}
+                ),
+            },
         )
         if done_count:
             notify_user(
@@ -371,6 +403,45 @@ async def generate_round_svgs(round_id: str) -> None:
                 {"game_id": round_record.game_id, "round_id": round_id, "type": "round.ready_to_guess"},
             )
         db.commit()
+
+
+def qualified_exception_type(exc: Exception) -> str:
+    return f"{exc.__class__.__module__}.{exc.__class__.__name__}"
+
+
+def finalize_provider_initialization_failure(db: Session, round_record: RoundORM) -> None:
+    for svg in round_record.generated_svgs:
+        if svg.status not in {SvgStatus.pending.value, SvgStatus.generating.value}:
+            continue
+        if svg.status == SvgStatus.pending.value:
+            svg.attempts += 1
+        svg.status = SvgStatus.failed.value
+        svg.provider_used = None
+        svg.error_message = PUBLIC_GENERATION_ERROR_MESSAGE
+        add_event(
+            db,
+            round_record.game_id,
+            "svg.failed",
+            {
+                "round_id": round_record.id,
+                "svg_id": svg.id,
+                "tier": svg.model_tier,
+                "code": PUBLIC_GENERATION_ERROR_CODE,
+                "message": PUBLIC_GENERATION_ERROR_MESSAGE,
+            },
+        )
+    round_record.status = RoundStatus.failed.value
+    add_event(
+        db,
+        round_record.game_id,
+        "round.failed",
+        {
+            "round_id": round_record.id,
+            "available_svgs": 0,
+            "code": PUBLIC_GENERATION_ERROR_CODE,
+            "message": PUBLIC_GENERATION_ERROR_MESSAGE,
+        },
+    )
 
 
 def prepare_generation_retry(db: Session, round_id: str, user_id: str) -> Round:
@@ -390,10 +461,11 @@ def prepare_generation_retry(db: Session, round_id: str, user_id: str) -> Round:
     round_record.updated_at = now()
     logger.info(
         "generation.retry_requested",
-        extra={"round_id": round_id, "game_id": round_record.game_id, "user_id": user_id, "original_prompt": round_record.original_prompt},
+        extra={"round_id": round_id, "game_id": round_record.game_id, "user_id": user_id},
     )
     for svg in retryable:
         svg.status = SvgStatus.pending.value
+        svg.provider_used = None
         svg.error_message = None
         svg.updated_at = now()
     add_event(
@@ -814,11 +886,12 @@ def to_svg_schema(svg: GeneratedSvgORM) -> GeneratedSvg:
         id=svg.id,
         model_name=svg.model_name,
         model_tier=svg.model_tier,
-        svg_text=svg.svg_text,
-        generation_time_seconds=svg.generation_time_seconds,
+        provider_used=svg.provider_used,
         status=svg.status,
+        svg_text=svg.svg_text,
         error_message=svg.error_message,
         attempts=svg.attempts,
+        generation_time_seconds=svg.generation_time_seconds,
     )
 
 

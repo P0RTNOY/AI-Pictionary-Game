@@ -101,6 +101,7 @@ class GeneratedSvg(BaseModel):
     id: str
     model_name: str
     model_tier: str
+    provider_used: Optional[str] = None
     svg_text: Optional[str] = None
     generation_time_seconds: Optional[float] = None
     status: SvgStatus = SvgStatus.pending
@@ -224,6 +225,7 @@ class NotificationAttempt(BaseModel):
 class AIStatus(BaseModel):
     runtime_provider: str
     openrouter_configured: bool
+    local_model_configured: bool
     mock_mode_notice: Optional[str] = None
     artist_models: list[dict[str, Any]]
     judge_model: str

@@ -34,11 +34,11 @@ def get_db() -> Generator[Session, None, None]:
         db.close()
 
 
-def _apply_sqlite_light_migrations() -> None:
-    inspector = inspect(engine)
+def _apply_sqlite_light_migrations(bind=engine) -> None:
+    inspector = inspect(bind)
+    statements = []
     if "users" in inspector.get_table_names():
         existing = {column["name"] for column in inspector.get_columns("users")}
-        statements = []
         if "avatar_emoji" not in existing:
             statements.append("ALTER TABLE users ADD COLUMN avatar_emoji VARCHAR(16) NOT NULL DEFAULT '🙂'")
         if "avatar_color" not in existing:
@@ -47,6 +47,10 @@ def _apply_sqlite_light_migrations() -> None:
             statements.append("ALTER TABLE users ADD COLUMN auth_provider VARCHAR(40)")
         if "auth_subject" not in existing:
             statements.append("ALTER TABLE users ADD COLUMN auth_subject VARCHAR(160)")
-        with engine.begin() as connection:
-            for statement in statements:
-                connection.execute(text(statement))
+    if "generated_svgs" in inspector.get_table_names():
+        existing = {column["name"] for column in inspector.get_columns("generated_svgs")}
+        if "provider_used" not in existing:
+            statements.append("ALTER TABLE generated_svgs ADD COLUMN provider_used VARCHAR(40)")
+    with bind.begin() as connection:
+        for statement in statements:
+            connection.execute(text(statement))

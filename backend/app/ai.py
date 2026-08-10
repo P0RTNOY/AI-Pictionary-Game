@@ -39,6 +39,9 @@ ARTIST_MODELS = [
 ]
 
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
+SUPPORTED_AI_PROVIDERS = {"mock", "openrouter", "local"}
+DEFAULT_PROVIDER_RESPONSE_MAX_BYTES = 1_000_000
+PROVIDER_RESPONSE_LIMIT_ENV = "AI_PROVIDER_RESPONSE_MAX_BYTES"
 STOPWORDS = {
     "a",
     "an",
@@ -79,6 +82,99 @@ ACTION_WORDS = {
 
 SETTING_WORDS = {"beach", "castle", "city", "court", "courtroom", "forest", "kitchen", "moon", "ocean", "school", "space"}
 MOOD_WORDS = {"angry", "confused", "cursed", "funny", "jealous", "sad", "scared", "sleepy", "weird"}
+
+
+class AIConfigurationError(RuntimeError):
+    """Raised when AI provider configuration is invalid."""
+
+
+class ProviderResponseError(RuntimeError):
+    """Raised when an upstream provider response cannot be safely consumed."""
+
+
+def provider_response_max_bytes() -> int:
+    raw_value = os.getenv(PROVIDER_RESPONSE_LIMIT_ENV)
+    if raw_value is None:
+        return DEFAULT_PROVIDER_RESPONSE_MAX_BYTES
+    try:
+        configured = int(raw_value)
+    except ValueError as exc:
+        raise AIConfigurationError("Invalid AI provider response limit configuration") from exc
+    if configured <= 0:
+        raise AIConfigurationError("Invalid AI provider response limit configuration")
+    return configured
+
+
+def _declared_response_is_oversized(response: httpx.Response, max_bytes: int) -> bool:
+    content_length = response.headers.get("Content-Length")
+    if content_length is None:
+        return False
+    try:
+        return int(content_length) > max_bytes
+    except ValueError:
+        return False
+
+
+def _parse_provider_json(body: bytes) -> dict[str, Any]:
+    try:
+        parsed = json.loads(body)
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise ProviderResponseError("Provider response was not valid JSON") from exc
+    if not isinstance(parsed, dict):
+        raise ProviderResponseError("Provider response had an invalid shape")
+    return parsed
+
+
+async def request_json_bounded(
+    client: httpx.AsyncClient,
+    method: str,
+    url: str,
+    *,
+    max_bytes: Optional[int] = None,
+    **request_kwargs: Any,
+) -> dict[str, Any]:
+    byte_limit = max_bytes if max_bytes is not None else provider_response_max_bytes()
+    async with client.stream(method, url, **request_kwargs) as response:
+        response.raise_for_status()
+        if _declared_response_is_oversized(response, byte_limit):
+            raise ProviderResponseError("Provider response exceeded the configured size limit")
+        body = bytearray()
+        async for chunk in response.aiter_bytes():
+            if len(body) + len(chunk) > byte_limit:
+                raise ProviderResponseError("Provider response exceeded the configured size limit")
+            body.extend(chunk)
+    return _parse_provider_json(bytes(body))
+
+
+def request_json_bounded_sync(
+    client: httpx.Client,
+    method: str,
+    url: str,
+    *,
+    max_bytes: Optional[int] = None,
+    **request_kwargs: Any,
+) -> dict[str, Any]:
+    byte_limit = max_bytes if max_bytes is not None else provider_response_max_bytes()
+    with client.stream(method, url, **request_kwargs) as response:
+        response.raise_for_status()
+        if _declared_response_is_oversized(response, byte_limit):
+            raise ProviderResponseError("Provider response exceeded the configured size limit")
+        body = bytearray()
+        for chunk in response.iter_bytes():
+            if len(body) + len(chunk) > byte_limit:
+                raise ProviderResponseError("Provider response exceeded the configured size limit")
+            body.extend(chunk)
+    return _parse_provider_json(bytes(body))
+
+
+def provider_message_content(payload: dict[str, Any]) -> str:
+    try:
+        content = payload["choices"][0]["message"]["content"]
+    except (KeyError, IndexError, TypeError) as exc:
+        raise ProviderResponseError("Provider response had an invalid shape") from exc
+    if not isinstance(content, str):
+        raise ProviderResponseError("Provider response had an invalid shape")
+    return content
 
 
 class AIProvider(ABC):
@@ -130,9 +226,14 @@ class OpenRouterAIProvider(AIProvider):
             payload["reasoning_effort"] = model_config["reasoning_effort"]
 
         async with httpx.AsyncClient(timeout=60) as client:
-            response = await client.post(OPENROUTER_URL, headers=openrouter_headers(self.api_key), json=payload)
-            response.raise_for_status()
-        raw_svg = response.json()["choices"][0]["message"]["content"]
+            response_payload = await request_json_bounded(
+                client,
+                "POST",
+                OPENROUTER_URL,
+                headers=openrouter_headers(self.api_key),
+                json=payload,
+            )
+        raw_svg = provider_message_content(response_payload)
         sanitized = sanitize_svg(raw_svg)
         validate_generated_svg(sanitized, challenge)
         return sanitized
@@ -148,9 +249,14 @@ class OpenRouterAIProvider(AIProvider):
             "response_format": {"type": "json_object"},
         }
         async with httpx.AsyncClient(timeout=35) as client:
-            response = await client.post(OPENROUTER_URL, headers=openrouter_headers(self.api_key), json=payload)
-            response.raise_for_status()
-        result = json.loads(response.json()["choices"][0]["message"]["content"])
+            response_payload = await request_json_bounded(
+                client,
+                "POST",
+                OPENROUTER_URL,
+                headers=openrouter_headers(self.api_key),
+                json=payload,
+            )
+        result = _parse_provider_json(provider_message_content(response_payload).encode("utf-8"))
         local = local_component_score(original, guess)
         return normalize_judge_result(result, fallback=local)
 
@@ -165,9 +271,14 @@ class OpenRouterAIProvider(AIProvider):
             "response_format": {"type": "json_object"},
         }
         with httpx.Client(timeout=35) as client:
-            response = client.post(OPENROUTER_URL, headers=openrouter_headers(self.api_key), json=payload)
-            response.raise_for_status()
-        result = json.loads(response.json()["choices"][0]["message"]["content"])
+            response_payload = request_json_bounded_sync(
+                client,
+                "POST",
+                OPENROUTER_URL,
+                headers=openrouter_headers(self.api_key),
+                json=payload,
+            )
+        result = _parse_provider_json(provider_message_content(response_payload).encode("utf-8"))
         return normalize_judge_result(result, fallback=local_component_score(original, guess))
 
 
@@ -187,9 +298,13 @@ class LocalModelProvider(AIProvider):
             "stream": False,
         }
         async with httpx.AsyncClient(timeout=90) as client:
-            response = await client.post(f"{self.base_url}/chat/completions", json=payload)
-            response.raise_for_status()
-        content = response.json()["choices"][0]["message"]["content"]
+            response_payload = await request_json_bounded(
+                client,
+                "POST",
+                f"{self.base_url}/chat/completions",
+                json=payload,
+            )
+        content = provider_message_content(response_payload)
         sanitized = sanitize_svg(content)
         validate_generated_svg(sanitized, challenge)
         return sanitized
@@ -198,8 +313,15 @@ class LocalModelProvider(AIProvider):
         return local_component_score(original, guess)
 
 
+def configured_provider_name() -> str:
+    provider = os.getenv("AI_PROVIDER", "openrouter" if os.getenv("OPENROUTER_API_KEY") else "mock").strip().lower()
+    if provider not in SUPPORTED_AI_PROVIDERS:
+        raise AIConfigurationError("Unsupported AI provider configuration")
+    return provider
+
+
 def get_ai_provider() -> AIProvider:
-    provider = os.getenv("AI_PROVIDER", "openrouter" if os.getenv("OPENROUTER_API_KEY") else "mock").lower()
+    provider = configured_provider_name()
     if provider == "openrouter":
         return OpenRouterAIProvider()
     if provider == "local":
@@ -208,11 +330,12 @@ def get_ai_provider() -> AIProvider:
 
 
 def get_ai_status() -> dict[str, Any]:
-    provider_name = os.getenv("AI_PROVIDER", "openrouter" if os.getenv("OPENROUTER_API_KEY") else "mock").lower()
+    provider_name = configured_provider_name()
     return {
         "runtime_provider": provider_name,
         "openrouter_configured": bool(os.getenv("OPENROUTER_API_KEY")),
-        "mock_mode_notice": "Mock mode uses deterministic prompt-derived test drawings; use OpenRouter/local for real visual quality."
+        "local_model_configured": bool(os.getenv("LOCAL_MODEL_BASE_URL") and os.getenv("LOCAL_MODEL_NAME")),
+        "mock_mode_notice": "Mock mode uses prompt-derived labels and placeholder shapes. It verifies game flow, not real drawing quality."
         if provider_name == "mock"
         else None,
         "artist_models": [
