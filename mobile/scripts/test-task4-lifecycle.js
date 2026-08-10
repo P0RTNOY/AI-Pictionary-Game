@@ -197,6 +197,32 @@ async function run() {
     "same-session refresh retires its accepted token before replacing it",
   );
 
+  const overlapWork = [deferred(), deferred()];
+  const overlapOrder = [];
+  let overlapAttempt = 0;
+  const overlapping = createIdentityWorkCoordinator({
+    sessionKey: (session) => session.key,
+    run: async () => {
+      const attempt = overlapAttempt;
+      overlapAttempt += 1;
+      overlapOrder.push(`register:${attempt + 1}`);
+      return overlapWork[attempt].promise;
+    },
+    cleanup: async (_session, result) => overlapOrder.push(`cleanup:${result.registrationId}`),
+    accept: () => {},
+    reject: () => {},
+    settle: async (promise) => ({ status: "completed", value: await promise }),
+  });
+  const overlapFirst = overlapping.activate(sessionB);
+  await Promise.resolve();
+  const overlapSecond = overlapping.activate(sessionB);
+  overlapWork[0].resolve({ token: "token-1", registrationId: "registration-1" });
+  await overlapFirst;
+  await waitFor(() => overlapAttempt === 2, "overlapping refresh should start a fresh attempt");
+  assert.deepEqual(overlapOrder, ["register:1", "cleanup:registration-1", "register:2"]);
+  overlapWork[1].resolve({ token: "token-2", registrationId: "registration-2" });
+  await overlapSecond;
+
   const { runWithDeadline } = loadTypeScriptModule("src/promiseDeadline.ts");
   let abortedSignal;
   const aborted = await runWithDeadline((signal) => {

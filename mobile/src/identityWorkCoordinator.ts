@@ -46,9 +46,6 @@ export function createIdentityWorkCoordinator<Session, Result>(
 
   function activate(session: Session): Promise<Result | null> {
     const key = callbacks.sessionKey(session);
-    const existing = active.get(key);
-    if (existing && currentKey === key) return existing.work;
-
     currentKey = key;
     const workGeneration = ++generation;
     const previousAccepted = accepted.get(key);
@@ -59,9 +56,7 @@ export function createIdentityWorkCoordinator<Session, Result>(
         () => cleanup(previousAccepted.session, previousAccepted.result, key),
       );
     }
-    const blockers: Promise<unknown>[] = [...active.entries()]
-      .filter(([activeKey]) => activeKey !== key)
-      .map(([, entry]) => entry.work);
+    const blockers: Promise<unknown>[] = [...active.values()].map((entry) => entry.work);
     blockers.push(...retiring.values());
     const work = (async () => {
       try {
