@@ -5,6 +5,7 @@ import { createWebSocketTicket } from "../api/websocketTickets";
 import type { GameEvent } from "../types/game";
 import { captureError, captureMessage } from "../utils/errorReporter";
 import { createRealtimeFailurePolicy } from "../realtimePolicy";
+import { createRealtimeCursor } from "../realtimeCursor";
 
 const MAX_RECONNECT_DELAY_MS = 10_000;
 const POLL_DELAY_MS = 2_500;
@@ -34,8 +35,7 @@ export function useGameEvents({
   const [lastEventId, setLastEventId] = useState(0);
   const [lastEventType, setLastEventType] = useState<string | null>(null);
   const onEventsRef = useRef(onEvents);
-  const seenIds = useRef(new Set<number>());
-  const lastId = useRef(0);
+  const cursor = useRef(createRealtimeCursor());
   const connectionGeneration = useRef(0);
 
   useEffect(() => {
@@ -44,10 +44,11 @@ export function useGameEvents({
 
   useEffect(() => {
     const generation = ++connectionGeneration.current;
-    seenIds.current = new Set<number>();
-    lastId.current = 0;
-    setLastEventId(0);
-    setLastEventType(null);
+    const identityChanged = cursor.current.setIdentity(gameId, userId);
+    if (identityChanged) {
+      setLastEventId(0);
+      setLastEventType(null);
+    }
     setConnected(false);
     setFallbackPolling(false);
 
@@ -68,14 +69,12 @@ export function useGameEvents({
 
     function emitDedup(events: GameEvent[]) {
       if (!isCurrent()) return;
-      const fresh = events.filter((event) => {
-        if (event.game_id !== activeGameId || seenIds.current.has(event.id)) return false;
-        seenIds.current.add(event.id);
-        lastId.current = Math.max(lastId.current, event.id);
-        setLastEventId(lastId.current);
-        setLastEventType(event.event_type);
-        return true;
-      });
+      const fresh = cursor.current.accept(activeGameId, events);
+      const latest = fresh.at(-1);
+      if (latest) {
+        setLastEventId(cursor.current.afterId());
+        setLastEventType(latest.event_type);
+      }
       if (fresh.length && isCurrent()) onEventsRef.current(fresh);
     }
 
@@ -89,7 +88,7 @@ export function useGameEvents({
         const pollDeadline = setTimeout(() => controller.abort(), POLL_TIMEOUT_MS);
         pollControllers.add(controller);
         try {
-          const events = await listEvents(activeGameId, lastId.current, controller.signal);
+          const events = await listEvents(activeGameId, cursor.current.afterId(), controller.signal);
           emitDedup(events);
         } catch (error) {
           if (isCurrent() && !controller.signal.aborted) {
@@ -137,7 +136,7 @@ export function useGameEvents({
       try {
         const issued = await createWebSocketTicket(activeGameId, ticketController.signal);
         if (!isCurrent()) return;
-        const candidate = new WebSocket(wsUrl(activeGameId, issued.ticket, lastId.current));
+        const candidate = new WebSocket(wsUrl(activeGameId, issued.ticket, cursor.current.afterId()));
         socket = candidate;
         socketDeadlineTimer = setTimeout(() => {
           if (!isCurrent() || socket !== candidate || candidate.readyState === WebSocket.OPEN) return;

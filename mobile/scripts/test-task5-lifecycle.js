@@ -173,6 +173,31 @@ async function run() {
   assert.equal(flapPolicy.healthy().usePolling, false);
   assert.equal(flapPolicy.failures(), 0, "only a sustained healthy connection resets failures");
 
+  const { createRealtimeCursor } = loadTypeScriptModule("src/realtimeCursor.ts");
+  const realtimeCursor = createRealtimeCursor(3);
+  assert.equal(realtimeCursor.setIdentity("game-a", "user-a"), true);
+  assert.deepEqual(realtimeCursor.accept("game-a", [
+    { id: 1, game_id: "game-a" },
+    { id: 2, game_id: "game-a" },
+  ]).map((event) => event.id), [1, 2]);
+  assert.equal(realtimeCursor.afterId(), 2);
+  assert.equal(realtimeCursor.setIdentity("game-a", "user-a"), false, "background disable/enable preserves identity cursor");
+  assert.deepEqual(realtimeCursor.accept("game-a", [
+    { id: 1, game_id: "game-a" },
+    { id: 2, game_id: "game-a" },
+    { id: 3, game_id: "game-a" },
+  ]).map((event) => event.id), [3], "resume cannot re-emit replayed IDs");
+  realtimeCursor.accept("game-a", [
+    { id: 4, game_id: "game-a" },
+    { id: 5, game_id: "game-a" },
+  ]);
+  assert.equal(realtimeCursor.seenSize(), 3, "dedupe memory stays bounded");
+  assert.equal(realtimeCursor.setIdentity("game-b", "user-a"), true);
+  assert.equal(realtimeCursor.afterId(), 0, "game change resets cursor");
+  assert.deepEqual(realtimeCursor.accept("game-b", [{ id: 1, game_id: "game-b" }]).map((event) => event.id), [1]);
+  assert.equal(realtimeCursor.setIdentity("game-b", "user-b"), true);
+  assert.equal(realtimeCursor.afterId(), 0, "user change resets cursor");
+
   const { createAbortDeadline } = loadTypeScriptModule("src/abortDeadline.ts");
   let deadlineCallback;
   let deadlineCleared = 0;
@@ -271,6 +296,7 @@ async function run() {
   assert.match(app, /request\.signal/);
   assert.match(events, /userId/);
   assert.match(events, /connectionGeneration/);
+  assert.match(events, /createRealtimeCursor/);
   assert.match(events, /pollTimer/);
   assert.match(events, /AbortController/);
   assert.match(events, /failurePolicy\.healthy/);
