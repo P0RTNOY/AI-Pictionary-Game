@@ -439,6 +439,10 @@ export default function App() {
       setScreen("waiting");
       return;
     }
+    if (latest.status === "judging") {
+      setScreen("waiting");
+      return;
+    }
     if (latest.status === "ready_to_guess") {
       setScreen(latest.guesser_user_id === activeUser.id ? "guess" : "waiting");
     }

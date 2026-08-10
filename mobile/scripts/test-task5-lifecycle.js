@@ -281,6 +281,8 @@ async function run() {
   const profile = read("src/screens/ProfileScreen.tsx");
   const createRound = read("src/screens/CreateRoundScreen.tsx");
   const client = read("src/api/client.ts");
+  const gameTypes = read("src/types/game.ts");
+  const statusPill = read("src/components/StatusPill.tsx");
 
   assert.match(app, /createRequestScope/);
   assert.match(app, /AppStateStatus/);
@@ -293,6 +295,7 @@ async function run() {
   assert.match(app, /createActionContextGuard/);
   assert.match(app, /retireActionWork/);
   assert.match(app, /selectedRefreshOperation\.retire/);
+  assert.match(app, /latest\.status === "judging"/);
   assert.match(app, /request\.signal/);
   assert.match(events, /userId/);
   assert.match(events, /connectionGeneration/);
@@ -311,6 +314,9 @@ async function run() {
   assert.match(guess, /revealClue/);
   assert.match(guess, /revealInFlight/);
   assert.match(guess, /\[lifecycleEpoch, round\.id\]/);
+  assert.match(gameTypes, /"judging"/);
+  assert.match(statusPill, /status === "judging"/);
+  assert.match(waiting, /Scoring guess/);
   for (const source of [waiting, guess, result]) {
     assert.match(source, /Mock output — testing only/);
     assert.doesNotMatch(source, /isDev && isMock/);

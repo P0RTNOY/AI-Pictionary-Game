@@ -81,9 +81,15 @@ export function WaitingScreen({
         </View>
       )}
       {!isMock && provider && <Text style={styles.tinyText}>Artifact provider: {provider}</Text>}
-      <Text style={styles.sectionTitle}>{round.status === "ready_to_guess" ? "Ready" : "Artists are drawing"}</Text>
+      <Text style={styles.sectionTitle}>
+        {round.status === "judging" ? "Scoring guess" : round.status === "ready_to_guess" ? "Ready" : "Artists are drawing"}
+      </Text>
       <Text style={styles.mutedText}>
-        {readyCount ? `${readyCount} artist${readyCount === 1 ? "" : "s"} ready. You can play with any successful sketch.` : "Each artist saves independently, so one slow model will not block the whole round."}
+        {round.status === "judging"
+          ? "The judge is comparing the submitted guess. This can take a moment."
+          : readyCount
+            ? `${readyCount} artist${readyCount === 1 ? "" : "s"} ready. You can play with any successful sketch.`
+            : "Each artist saves independently, so one slow model will not block the whole round."}
       </Text>
       <View style={styles.panel}>
         {round.generated_svgs.map((svg, index) => (

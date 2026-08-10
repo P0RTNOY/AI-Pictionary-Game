@@ -10,6 +10,8 @@ export function StatusPill({ status }: { status: RoundStatus | "your_turn" | "wa
         ? "Waiting"
         : status === "ready_to_guess"
           ? "Guess"
+          : status === "judging"
+            ? "Scoring"
           : status === "generating"
             ? "Drawing"
             : status === "guessed"

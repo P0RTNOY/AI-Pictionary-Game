@@ -158,6 +158,7 @@ function gameDescription(game: Game, userId: string) {
   const latest = game.latest_round;
   if (latest?.status === "guessed") return latest.guess?.short_feedback ?? "Round scored.";
   if (latest?.status === "ready_to_guess") return latest.guesser_user_id === userId ? "Sketches are ready. Make your guess." : "Waiting for opponent to guess.";
+  if (latest?.status === "judging") return "Scoring the guess.";
   if (latest?.status === "generating") return "AI artists are drawing.";
   return game.current_turn_user_id === userId ? "Create the next prompt." : "Waiting for opponent to create a prompt.";
 }

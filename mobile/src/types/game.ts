@@ -1,4 +1,4 @@
-export type RoundStatus = "generating" | "ready_to_guess" | "guessed" | "failed";
+export type RoundStatus = "generating" | "ready_to_guess" | "judging" | "guessed" | "failed";
 export type SvgStatus = "pending" | "generating" | "done" | "failed";
 
 export type User = {
