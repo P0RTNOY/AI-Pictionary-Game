@@ -3,9 +3,9 @@ import { StatusBar } from "expo-status-bar";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Alert, AppState, KeyboardAvoidingView, Linking, Platform, SafeAreaView } from "react-native";
 
-import { healthCheck } from "./src/api/client";
+import { configureApiCredential, healthCheck, isUnauthorizedError } from "./src/api/client";
 import { getAIStatus, type AIStatus } from "./src/api/ai";
-import { getGameForUser, getGameStats, listGames } from "./src/api/games";
+import { getGame, getGameStats, listGames } from "./src/api/games";
 import { createUser, getUser, updateUser } from "./src/api/users";
 import { Header } from "./src/components/Header";
 import { useGameEvents } from "./src/hooks/useGameEvents";
@@ -29,6 +29,7 @@ import { captureError, captureMessage } from "./src/utils/errorReporter";
 type Screen = "onboarding" | "home" | "profile_setup" | "edit_profile" | "invites" | "create_round" | "waiting" | "guess" | "result" | "debug";
 
 const USER_ID_KEY = "ai-pictionary:user-id";
+const SESSION_TOKEN_KEY = "ai-pictionary:session-token";
 const ONBOARDING_KEY = "ai-pictionary:onboarding-complete";
 
 export default function App() {
@@ -79,7 +80,7 @@ export default function App() {
     const interval = setInterval(async () => {
       try {
         if (!user) return;
-        const latest = await getGameForUser(selectedGame.id, user.id);
+        const latest = await getGame(selectedGame.id);
         setSelectedGame(latest);
         setSelectedRound(latest.latest_round);
         routeForGame(latest, false);
@@ -110,7 +111,7 @@ export default function App() {
     async (gameId: string) => {
       if (!user) return;
       try {
-        const game = await getGameForUser(gameId, user.id);
+        const game = await getGame(gameId);
         openGame(game);
       } catch (error) {
         Alert.alert("Could not open game", getErrorMessage(error));
@@ -121,7 +122,6 @@ export default function App() {
 
   const realtimeStatus = useGameEvents({
     gameId: selectedGame?.id ?? null,
-    userId: user?.id ?? null,
     enabled: Boolean(selectedGame && user),
     onEvents: handleGameEvents,
   });
@@ -132,21 +132,38 @@ export default function App() {
   const selectedLatestRound = useMemo(() => selectedRound ?? selectedGame?.latest_round ?? null, [selectedGame, selectedRound]);
 
   async function ensureLocalUser() {
+    const onboardingDone = await AsyncStorage.getItem(ONBOARDING_KEY);
     try {
-      const storedId = await AsyncStorage.getItem(USER_ID_KEY);
-      if (storedId) {
+      const [storedId, storedToken] = await Promise.all([
+        AsyncStorage.getItem(USER_ID_KEY),
+        AsyncStorage.getItem(SESSION_TOKEN_KEY),
+      ]);
+      if (storedId && storedToken) {
+        configureApiCredential(storedToken);
         const existing = await getUser(storedId);
         setUser(existing);
         return;
       }
-      const onboardingDone = await AsyncStorage.getItem(ONBOARDING_KEY);
+      if (storedId || storedToken) await clearStoredSession();
       setScreen(onboardingDone ? "profile_setup" : "onboarding");
       return;
-    } catch {
-      await AsyncStorage.removeItem(USER_ID_KEY);
+    } catch (error) {
+      if (isUnauthorizedError(error)) {
+        await clearStoredSession();
+        setScreen(onboardingDone ? "profile_setup" : "onboarding");
+        return;
+      }
     }
 
     setScreen("onboarding");
+  }
+
+  async function clearStoredSession() {
+    configureApiCredential(null);
+    await Promise.all([
+      AsyncStorage.removeItem(USER_ID_KEY),
+      AsyncStorage.removeItem(SESSION_TOKEN_KEY),
+    ]);
   }
 
   async function refreshBackendHealth() {
@@ -172,7 +189,7 @@ export default function App() {
     lastHandledUrl.current = url;
     const inviteCode = parseInviteCodeFromUrl(url);
     if (!inviteCode) return;
-    captureMessage("Invite deep link received", { area: "deep_link", inviteCode });
+    captureMessage("Invite deep link received", { area: "deep_link" });
     setPendingInviteCode(inviteCode);
     if (user) {
       setSelectedGame(null);
@@ -197,7 +214,7 @@ export default function App() {
     setSelectedGameLoading(true);
     setSelectedGameError(null);
     try {
-      const latest = await getGameForUser(gameId, userId);
+      const latest = await getGame(gameId);
       setSelectedGame(latest);
       setSelectedRound(latest.latest_round);
       refreshStats(gameId, userId);
@@ -214,7 +231,7 @@ export default function App() {
 
   async function refreshStats(gameId: string, userId: string) {
     try {
-      setSelectedStats(await getGameStats(gameId, userId));
+      setSelectedStats(await getGameStats(gameId));
     } catch {
       setSelectedStats(null);
     }
@@ -260,7 +277,7 @@ export default function App() {
     setSelectedGameLoading(true);
     setSelectedGameError(null);
     try {
-      const [joinedGame, refreshedGames] = await Promise.all([getGameForUser(game.id, user.id), listGames(user.id)]);
+      const [joinedGame, refreshedGames] = await Promise.all([getGame(game.id), listGames(user.id)]);
       captureMessage("Games refreshed after invite join", { area: "invite_join", gameId: game.id, count: refreshedGames.length });
       setGames(refreshedGames);
       setSelectedGame(joinedGame);
@@ -337,9 +354,13 @@ export default function App() {
           <ProfileScreen
             user={null}
             onSave={async (payload) => {
-              const created = await createUser(payload.display_name, payload.avatar_emoji, payload.avatar_color);
-              await AsyncStorage.setItem(USER_ID_KEY, created.id);
-              setUser(created);
+              const session = await createUser(payload.display_name, payload.avatar_emoji, payload.avatar_color);
+              await Promise.all([
+                AsyncStorage.setItem(USER_ID_KEY, session.user.id),
+                AsyncStorage.setItem(SESSION_TOKEN_KEY, session.access_token),
+              ]);
+              configureApiCredential(session.access_token);
+              setUser(session.user);
               setScreen(pendingInviteCode ? "invites" : "home");
             }}
           />

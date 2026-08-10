@@ -1,8 +1,14 @@
 import { apiFetch } from "./client";
 import type { User } from "../types/game";
 
-export function createUser(displayName: string, avatarEmoji = "🙂", avatarColor = "#F5C84C"): Promise<User> {
-  return apiFetch<User>("/users", {
+export type UserSession = {
+  user: User;
+  access_token: string;
+  token_type: "bearer";
+};
+
+export function createUser(displayName: string, avatarEmoji = "🙂", avatarColor = "#F5C84C"): Promise<UserSession> {
+  return apiFetch<UserSession>("/users", {
     method: "POST",
     body: JSON.stringify({ display_name: displayName, avatar_emoji: avatarEmoji, avatar_color: avatarColor }),
   });

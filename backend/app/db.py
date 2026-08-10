@@ -47,10 +47,26 @@ def _apply_sqlite_light_migrations(bind=engine) -> None:
             statements.append("ALTER TABLE users ADD COLUMN auth_provider VARCHAR(40)")
         if "auth_subject" not in existing:
             statements.append("ALTER TABLE users ADD COLUMN auth_subject VARCHAR(160)")
+        if "session_token_hash" not in existing:
+            statements.append("ALTER TABLE users ADD COLUMN session_token_hash VARCHAR(64)")
+        statements.append(
+            "CREATE UNIQUE INDEX IF NOT EXISTS ix_users_session_token_hash ON users (session_token_hash)"
+        )
     if "generated_svgs" in inspector.get_table_names():
         existing = {column["name"] for column in inspector.get_columns("generated_svgs")}
         if "provider_used" not in existing:
             statements.append("ALTER TABLE generated_svgs ADD COLUMN provider_used VARCHAR(40)")
+    if "guesses" in inspector.get_table_names():
+        statements.append("CREATE UNIQUE INDEX IF NOT EXISTS uq_guesses_round_id ON guesses (round_id)")
+    if "rounds" in inspector.get_table_names():
+        statements.append(
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_rounds_one_active_per_game ON rounds (game_id) "
+            "WHERE status IN ('generating', 'ready_to_guess')"
+        )
+    if "generation_admission_gate" in inspector.get_table_names():
+        statements.append(
+            "INSERT INTO generation_admission_gate (id, version) VALUES (1, 0) ON CONFLICT(id) DO NOTHING"
+        )
     with bind.begin() as connection:
         for statement in statements:
             connection.execute(text(statement))

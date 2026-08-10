@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Optional
 
-from sqlalchemy import DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy import DateTime, ForeignKey, Index, Integer, String, Text, text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db import Base
@@ -28,6 +28,7 @@ class User(TimestampMixin, Base):
     avatar_color: Mapped[str] = mapped_column(String(16), default="#F5C84C", nullable=False)
     auth_provider: Mapped[Optional[str]] = mapped_column(String(40))
     auth_subject: Mapped[Optional[str]] = mapped_column(String(160))
+    session_token_hash: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, unique=True, index=True)
 
 
 class Game(TimestampMixin, Base):
@@ -46,7 +47,7 @@ class Game(TimestampMixin, Base):
 class GameInvite(TimestampMixin, Base):
     __tablename__ = "game_invites"
 
-    code: Mapped[str] = mapped_column(String(24), primary_key=True)
+    code: Mapped[str] = mapped_column(String(64), primary_key=True)
     creator_user_id: Mapped[str] = mapped_column(String(64), ForeignKey("users.id"), nullable=False)
     game_id: Mapped[Optional[str]] = mapped_column(String(64), ForeignKey("games.id"))
     status: Mapped[str] = mapped_column(String(40), default="pending", nullable=False)
@@ -84,6 +85,15 @@ class NotificationAttempt(Base):
 
 class Round(TimestampMixin, Base):
     __tablename__ = "rounds"
+    __table_args__ = (
+        Index(
+            "uq_rounds_one_active_per_game",
+            "game_id",
+            unique=True,
+            sqlite_where=text("status IN ('generating', 'ready_to_guess')"),
+            postgresql_where=text("status IN ('generating', 'ready_to_guess')"),
+        ),
+    )
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     game_id: Mapped[str] = mapped_column(String(64), ForeignKey("games.id"), nullable=False)
@@ -121,6 +131,7 @@ class GeneratedSvg(TimestampMixin, Base):
 
 class Guess(TimestampMixin, Base):
     __tablename__ = "guesses"
+    __table_args__ = (Index("uq_guesses_round_id", "round_id", unique=True),)
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     round_id: Mapped[str] = mapped_column(String(64), ForeignKey("rounds.id"), nullable=False)
@@ -132,6 +143,13 @@ class Guess(TimestampMixin, Base):
     clue_count_used: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
 
     round: Mapped[Round] = relationship(back_populates="guesses")
+
+
+class GenerationAdmissionGate(Base):
+    __tablename__ = "generation_admission_gate"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    version: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
 
 
 class GameEvent(Base):

@@ -16,14 +16,10 @@ export function getGame(gameId: string): Promise<Game> {
   return apiFetch<Game>(`/games/${gameId}`);
 }
 
-export function getGameForUser(gameId: string, userId: string): Promise<Game> {
-  return apiFetch<Game>(`/games/${gameId}?user_id=${encodeURIComponent(userId)}`);
-}
-
 export function listEvents(gameId: string, afterId = 0): Promise<GameEvent[]> {
   return apiFetch<GameEvent[]>(`/games/${gameId}/events?after_id=${afterId}`);
 }
 
-export function getGameStats(gameId: string, userId: string): Promise<GameStats> {
-  return apiFetch<GameStats>(`/games/${gameId}/stats?user_id=${encodeURIComponent(userId)}`);
+export function getGameStats(gameId: string): Promise<GameStats> {
+  return apiFetch<GameStats>(`/games/${gameId}/stats`);
 }

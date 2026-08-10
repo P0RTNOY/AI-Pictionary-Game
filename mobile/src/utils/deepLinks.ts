@@ -8,7 +8,7 @@ export function buildInviteLink(code: string, mode: "dev" | "prod" = "dev") {
 }
 
 export function normalizeInviteCode(code: string) {
-  return code.trim().replace(/[^a-zA-Z0-9]/g, "").toUpperCase();
+  return code.trim();
 }
 
 export function parseInviteCodeFromUrl(url: string | null | undefined): string | null {
@@ -23,7 +23,7 @@ export function parseInviteCodeFromUrl(url: string | null | undefined): string |
       return normalizeInviteCode(parsed.pathname.replace("/invite/", ""));
     }
   } catch {
-    const match = url.match(/(?:invite\/)([a-zA-Z0-9]+)/);
+    const match = url.match(/(?:invite\/)([a-zA-Z0-9_-]+)/);
     return match ? normalizeInviteCode(match[1]) : null;
   }
   return null;

@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 from enum import Enum
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class RoundStatus(str, Enum):
@@ -33,12 +33,12 @@ class InviteStatus(str, Enum):
 
 
 class UserCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     display_name: str = Field(default="Local Player", min_length=1, max_length=80)
     avatar_url: Optional[str] = None
     avatar_emoji: str = Field(default="🙂", min_length=1, max_length=8)
     avatar_color: str = Field(default="#F5C84C", min_length=4, max_length=16)
-    auth_provider: Optional[str] = Field(default=None, max_length=40)
-    auth_subject: Optional[str] = Field(default=None, max_length=160)
 
 
 class UserUpdate(BaseModel):
@@ -57,6 +57,12 @@ class User(BaseModel):
     auth_subject: Optional[str] = None
     created_at: str
     updated_at: str
+
+
+class UserSession(BaseModel):
+    user: User
+    access_token: str
+    token_type: Literal["bearer"] = "bearer"
 
 
 class GameCreate(BaseModel):
@@ -94,7 +100,7 @@ class RoundCreate(BaseModel):
 
 class GameRoundCreate(BaseModel):
     prompt: str = Field(min_length=6, max_length=240)
-    creator_user_id: str
+    creator_user_id: Optional[str] = None
 
 
 class GeneratedSvg(BaseModel):
@@ -131,7 +137,7 @@ class GuessCreate(BaseModel):
 
 
 class RetryGenerationRequest(BaseModel):
-    user_id: str
+    user_id: Optional[str] = None
 
 
 class GuessResult(BaseModel):
@@ -158,7 +164,7 @@ class GameEvent(BaseModel):
 
 
 class InviteCreate(BaseModel):
-    creator_user_id: str
+    creator_user_id: Optional[str] = None
     expires_in_hours: int = Field(default=72, ge=1, le=24 * 14)
 
 
@@ -174,12 +180,19 @@ class GameInvite(BaseModel):
     updated_at: str
 
 
+class GameInvitePreview(BaseModel):
+    code: str
+    creator_user_id: str
+    status: InviteStatus
+    expires_at: str
+
+
 class InviteJoin(BaseModel):
-    user_id: str
+    user_id: Optional[str] = None
 
 
 class DeviceTokenRegister(BaseModel):
-    user_id: str
+    user_id: Optional[str] = None
     token: str = Field(min_length=8, max_length=500)
     provider: str = Field(default="expo", min_length=2, max_length=40)
     platform: str = Field(default="unknown", min_length=2, max_length=40)

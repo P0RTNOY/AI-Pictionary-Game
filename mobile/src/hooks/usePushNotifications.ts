@@ -95,6 +95,6 @@ async function register(userId: string) {
   const token = projectId
     ? (await Notifications.getExpoPushTokenAsync({ projectId })).data
     : (await Notifications.getExpoPushTokenAsync()).data;
-  await registerDeviceToken(userId, token);
+  await registerDeviceToken(token);
   return { permissionStatus: status, token };
 }

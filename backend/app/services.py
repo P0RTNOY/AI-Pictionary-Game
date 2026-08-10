@@ -1,19 +1,30 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import logging
-import random
-import string
+import secrets
 import time
 import uuid
+from collections import defaultdict, deque
 from datetime import datetime, timedelta, timezone
+from threading import Lock
 from typing import Any, Optional
 
 from fastapi import HTTPException
-from sqlalchemy import or_, select
+from sqlalchemy import func, or_, select, text, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
 from app.ai import ARTIST_MODELS, get_ai_provider
+from app.config import (
+    GLOBAL_DAILY_ROUND_LIMIT,
+    GLOBAL_GENERATING_ROUND_LIMIT,
+    INVITE_ATTEMPT_LIMIT,
+    INVITE_ATTEMPT_WINDOW_SECONDS,
+    INVITE_RATE_LIMIT_MAX_SOURCES,
+    PER_USER_DAILY_ROUND_LIMIT,
+)
 from app.db import SessionLocal
 from app.models import (
     Game,
@@ -22,6 +33,7 @@ from app.models import (
     GameRoundCreate,
     GameStats,
     GameInvite,
+    GameInvitePreview,
     InviteCreate,
     InviteJoin,
     InviteStatus,
@@ -36,6 +48,7 @@ from app.models import (
     TestNotificationResponse,
     User,
     UserCreate,
+    UserSession,
     UserUpdate,
 )
 from app.notifications import get_notification_provider, notify_user
@@ -54,6 +67,11 @@ from app.safety import validate_challenge_prompt
 logger = logging.getLogger("ai_pictionary.services")
 PUBLIC_GENERATION_ERROR_CODE = "generation_failed"
 PUBLIC_GENERATION_ERROR_MESSAGE = "Drawing generation failed. Please try again."
+AUTHENTICATION_ERROR = "Invalid or missing bearer token"
+INVITE_RATE_LIMIT_ERROR = {"code": "invite_rate_limited", "message": "Too many invite attempts"}
+
+_invite_attempts: dict[str, deque[float]] = defaultdict(deque)
+_invite_attempts_lock = Lock()
 
 
 def now() -> datetime:
@@ -62,6 +80,54 @@ def now() -> datetime:
 
 def new_id() -> str:
     return str(uuid.uuid4())
+
+
+def hash_access_token(access_token: str) -> str:
+    return hashlib.sha256(access_token.encode("utf-8")).hexdigest()
+
+
+def authenticate_access_token(db: Session, access_token: str) -> UserORM:
+    token_hash = hash_access_token(access_token)
+    user = db.scalar(select(UserORM).where(UserORM.session_token_hash == token_hash))
+    if not user:
+        raise HTTPException(
+            status_code=401,
+            detail=AUTHENTICATION_ERROR,
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    return user
+
+
+def assert_actor_matches(asserted_user_id: Optional[str], actor_user_id: str) -> None:
+    if asserted_user_id is not None and asserted_user_id != actor_user_id:
+        raise HTTPException(status_code=403, detail="Authenticated user does not match requested actor")
+
+
+def check_invite_attempt(source: str, timestamp: Optional[float] = None) -> None:
+    current = time.monotonic() if timestamp is None else timestamp
+    cutoff = current - INVITE_ATTEMPT_WINDOW_SECONDS
+    with _invite_attempts_lock:
+        if source not in _invite_attempts and len(_invite_attempts) >= INVITE_RATE_LIMIT_MAX_SOURCES:
+            stale_sources = [
+                tracked_source
+                for tracked_source, tracked_attempts in _invite_attempts.items()
+                if not tracked_attempts or tracked_attempts[-1] <= cutoff
+            ]
+            for tracked_source in stale_sources:
+                del _invite_attempts[tracked_source]
+            if len(_invite_attempts) >= INVITE_RATE_LIMIT_MAX_SOURCES:
+                raise HTTPException(status_code=429, detail=INVITE_RATE_LIMIT_ERROR)
+        attempts = _invite_attempts[source]
+        while attempts and attempts[0] <= cutoff:
+            attempts.popleft()
+        if len(attempts) >= INVITE_ATTEMPT_LIMIT:
+            raise HTTPException(status_code=429, detail=INVITE_RATE_LIMIT_ERROR)
+        attempts.append(current)
+
+
+def reset_invite_attempt_limiter() -> None:
+    with _invite_attempts_lock:
+        _invite_attempts.clear()
 
 
 def serialize_dt(value: Optional[datetime]) -> Optional[str]:
@@ -85,13 +151,31 @@ def create_user(db: Session, payload: UserCreate) -> User:
         avatar_url=payload.avatar_url,
         avatar_emoji=payload.avatar_emoji,
         avatar_color=payload.avatar_color,
-        auth_provider=payload.auth_provider,
-        auth_subject=payload.auth_subject,
+        auth_provider=None,
+        auth_subject=None,
     )
     db.add(user)
     db.commit()
     db.refresh(user)
     return to_user_schema(user)
+
+
+def create_user_session(db: Session, payload: UserCreate) -> UserSession:
+    access_token = secrets.token_urlsafe(32)
+    user = UserORM(
+        id=new_id(),
+        display_name=payload.display_name.strip(),
+        avatar_url=payload.avatar_url,
+        avatar_emoji=payload.avatar_emoji,
+        avatar_color=payload.avatar_color,
+        auth_provider=None,
+        auth_subject=None,
+        session_token_hash=hash_access_token(access_token),
+    )
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+    return UserSession(user=to_user_schema(user), access_token=access_token)
 
 
 def get_user(db: Session, user_id: str) -> User:
@@ -210,6 +294,58 @@ def create_legacy_round(db: Session, payload: RoundCreate) -> Round:
     )
 
 
+def acquire_generation_admission(db: Session) -> None:
+    db.execute(
+        text(
+            "INSERT INTO generation_admission_gate (id, version) VALUES (1, 0) "
+            "ON CONFLICT(id) DO NOTHING"
+        )
+    )
+    db.execute(
+        text("UPDATE generation_admission_gate SET version = version + 1 WHERE id = 1")
+    )
+
+
+def enforce_new_round_budgets(db: Session, creator_user_id: str) -> None:
+    acquire_generation_admission(db)
+    current = now()
+    day_start = current.replace(hour=0, minute=0, second=0, microsecond=0)
+    user_daily_count = db.scalar(
+        select(func.count(RoundORM.id)).where(
+            RoundORM.creator_user_id == creator_user_id,
+            RoundORM.created_at >= day_start,
+        )
+    ) or 0
+    if user_daily_count >= PER_USER_DAILY_ROUND_LIMIT:
+        raise HTTPException(
+            status_code=429,
+            detail={"code": "user_daily_round_limit", "message": "Daily round limit reached"},
+        )
+
+    global_daily_count = db.scalar(
+        select(func.count(RoundORM.id)).where(RoundORM.created_at >= day_start)
+    ) or 0
+    if global_daily_count >= GLOBAL_DAILY_ROUND_LIMIT:
+        raise HTTPException(
+            status_code=429,
+            detail={"code": "global_daily_round_limit", "message": "Global daily round limit reached"},
+        )
+    enforce_generation_capacity(db)
+
+
+def enforce_generation_capacity(db: Session, *, admission_acquired: bool = True) -> None:
+    if not admission_acquired:
+        acquire_generation_admission(db)
+    generating_count = db.scalar(
+        select(func.count(RoundORM.id)).where(RoundORM.status == RoundStatus.generating.value)
+    ) or 0
+    if generating_count >= GLOBAL_GENERATING_ROUND_LIMIT:
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "generation_capacity_reached", "message": "Generation capacity reached"},
+        )
+
+
 def create_round_for_game(
     db: Session,
     game_id: str,
@@ -217,35 +353,43 @@ def create_round_for_game(
     enforce_turn: bool = True,
     commit: bool = True,
 ) -> Round:
+    creator_user_id = payload.creator_user_id
+    if not creator_user_id:
+        raise HTTPException(status_code=422, detail="Creator user is required")
     game = db.get(GameORM, game_id)
     if not game:
         raise HTTPException(status_code=404, detail="Game not found")
-    if payload.creator_user_id not in {game.player_1_id, game.player_2_id}:
+    if creator_user_id not in {game.player_1_id, game.player_2_id}:
         raise HTTPException(status_code=403, detail="Creator is not a player in this game")
-    if enforce_turn and game.current_turn_user_id != payload.creator_user_id:
+    if enforce_turn and game.current_turn_user_id != creator_user_id:
         raise HTTPException(status_code=409, detail="It is not this user's turn")
 
-    guesser_user_id = other_player_id(game, payload.creator_user_id)
+    guesser_user_id = other_player_id(game, creator_user_id)
     active_round = latest_round_orm(db, game.id)
     if active_round and active_round.status in {RoundStatus.generating.value, RoundStatus.ready_to_guess.value}:
         raise HTTPException(status_code=409, detail="This game already has an active round")
+    enforce_new_round_budgets(db, creator_user_id)
 
     round_record = RoundORM(
         id=new_id(),
         game_id=game.id,
-        creator_user_id=payload.creator_user_id,
+        creator_user_id=creator_user_id,
         guesser_user_id=guesser_user_id,
         original_prompt=validate_challenge_prompt(payload.prompt),
         status=RoundStatus.generating.value,
     )
     db.add(round_record)
-    db.flush()
+    try:
+        db.flush()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="This game already has an active round") from exc
     logger.info(
         "round.created",
         extra={
             "round_id": round_record.id,
             "game_id": game.id,
-            "creator_user_id": payload.creator_user_id,
+            "creator_user_id": creator_user_id,
         },
     )
 
@@ -260,7 +404,7 @@ def create_round_for_game(
                 status=SvgStatus.pending.value,
             )
         )
-    add_event(db, game.id, "round.created", {"round_id": round_record.id}, user_id=payload.creator_user_id)
+    add_event(db, game.id, "round.created", {"round_id": round_record.id}, user_id=creator_user_id)
     notify_user(
         db,
         guesser_user_id,
@@ -451,15 +595,31 @@ def prepare_generation_retry(db: Session, round_id: str, user_id: str) -> Round:
     if not game:
         raise HTTPException(status_code=404, detail="Game not found")
     require_game_participant(game, user_id)
+    if round_record.creator_user_id != user_id:
+        raise HTTPException(status_code=403, detail="Only the prompt creator can retry generation")
+    if game.current_turn_user_id != user_id:
+        raise HTTPException(status_code=409, detail="It is not this user's turn")
     if round_record.status == RoundStatus.guessed.value:
         raise HTTPException(status_code=409, detail="Cannot retry a round after it has been guessed")
+    if round_record.status == RoundStatus.generating.value:
+        raise HTTPException(status_code=409, detail="Round generation is already in progress")
 
     retryable = [svg for svg in round_record.generated_svgs if svg.status != SvgStatus.done.value]
     if not retryable:
         raise HTTPException(status_code=409, detail="All artist sketches are already ready")
 
+    enforce_generation_capacity(db, admission_acquired=False)
+    updated_at = now()
+    transition = db.execute(
+        update(RoundORM)
+        .where(RoundORM.id == round_id, RoundORM.status == round_record.status)
+        .values(status=RoundStatus.generating.value, updated_at=updated_at)
+    )
+    if transition.rowcount != 1:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="Round state changed; refresh and try again")
     round_record.status = RoundStatus.generating.value
-    round_record.updated_at = now()
+    round_record.updated_at = updated_at
     logger.info(
         "generation.retry_requested",
         extra={"round_id": round_id, "game_id": round_record.game_id, "user_id": user_id},
@@ -469,6 +629,11 @@ def prepare_generation_retry(db: Session, round_id: str, user_id: str) -> Round:
         svg.provider_used = None
         svg.error_message = None
         svg.updated_at = now()
+    try:
+        db.flush()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="This game already has an active round") from exc
     add_event(
         db,
         round_record.game_id,
@@ -486,12 +651,12 @@ def get_round(db: Session, round_id: str, reveal_prompt: bool = True) -> Round:
     return to_round_schema(round_record, reveal_prompt=reveal_prompt)
 
 
-def get_round_for_user(db: Session, round_id: str, user_id: Optional[str]) -> Round:
+def get_round_for_user(db: Session, round_id: str, user_id: str) -> Round:
     round_record = load_round_orm(db, round_id)
-    if user_id:
-        game = db.get(GameORM, round_record.game_id)
-        if game:
-            require_game_participant(game, user_id)
+    game = db.get(GameORM, round_record.game_id)
+    if not game:
+        raise HTTPException(status_code=404, detail="Game not found")
+    require_game_participant(game, user_id)
     reveal_prompt = should_reveal_prompt(round_record, user_id)
     return to_round_schema(round_record, reveal_prompt=reveal_prompt)
 
@@ -508,6 +673,16 @@ def submit_guess(db: Session, round_id: str, guess_text: str, user_id: Optional[
         raise HTTPException(status_code=403, detail="Only the guesser can submit a guess")
     if guesser_user_id == round_record.creator_user_id:
         raise HTTPException(status_code=403, detail="You cannot guess your own prompt")
+
+    completed_at = now()
+    transition = db.execute(
+        update(RoundORM)
+        .where(RoundORM.id == round_id, RoundORM.status == RoundStatus.ready_to_guess.value)
+        .values(status=RoundStatus.guessed.value, completed_at=completed_at, updated_at=completed_at)
+    )
+    if transition.rowcount != 1:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="This round has already been guessed")
 
     provider = get_ai_provider()
     judge = provider.score_guess_sync(round_record.original_prompt, guess_text)
@@ -526,13 +701,17 @@ def submit_guess(db: Session, round_id: str, guess_text: str, user_id: Optional[
         clue_count_used=clue_count_used,
     )
     round_record.status = RoundStatus.guessed.value
-    round_record.completed_at = now()
+    round_record.completed_at = completed_at
     game = db.get(GameORM, round_record.game_id)
     if game:
         game.current_turn_user_id = guesser_user_id
         game.updated_at = now()
     db.add(guess)
-    db.flush()
+    try:
+        db.flush()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="This round has already been guessed") from exc
     add_event(db, round_record.game_id, "guess.submitted", {"round_id": round_record.id}, user_id=guesser_user_id)
     add_event(db, round_record.game_id, "round.scored", {"round_id": round_record.id, "score": score})
     add_event(db, round_record.game_id, "turn.changed", {"current_turn_user_id": guesser_user_id})
@@ -555,7 +734,17 @@ def submit_guess(db: Session, round_id: str, guess_text: str, user_id: Optional[
     return guess_to_schema(guess)
 
 
-def list_events(db: Session, game_id: str, after_id: int = 0) -> list[GameEvent]:
+def list_events(
+    db: Session,
+    game_id: str,
+    after_id: int = 0,
+    user_id: Optional[str] = None,
+) -> list[GameEvent]:
+    game = db.get(GameORM, game_id)
+    if not game:
+        raise HTTPException(status_code=404, detail="Game not found")
+    if user_id is not None:
+        require_game_participant(game, user_id)
     events = (
         db.execute(
             select(GameEventORM)
@@ -597,11 +786,14 @@ def list_notification_attempts(db: Session, limit: int = 100) -> list[dict[str, 
 
 
 def create_invite(db: Session, payload: InviteCreate) -> GameInvite:
-    require_user(db, payload.creator_user_id)
+    creator_user_id = payload.creator_user_id
+    if not creator_user_id:
+        raise HTTPException(status_code=422, detail="Creator user is required")
+    require_user(db, creator_user_id)
     code = generate_invite_code(db)
     invite = GameInviteORM(
         code=code,
-        creator_user_id=payload.creator_user_id,
+        creator_user_id=creator_user_id,
         status=InviteStatus.pending.value,
         expires_at=now() + timedelta(hours=payload.expires_in_hours),
     )
@@ -617,31 +809,60 @@ def get_invite(db: Session, code: str) -> GameInvite:
     return to_invite_schema(invite)
 
 
+def get_invite_preview(db: Session, code: str) -> GameInvitePreview:
+    invite = load_invite(db, code)
+    refresh_invite_expiry(db, invite)
+    return to_invite_preview_schema(invite)
+
+
 def join_invite(db: Session, code: str, payload: InviteJoin) -> Game:
+    joiner_user_id = payload.user_id
+    if not joiner_user_id:
+        raise HTTPException(status_code=422, detail="Joining user is required")
     invite = load_invite(db, code)
     refresh_invite_expiry(db, invite)
     if invite.status != InviteStatus.pending.value:
-        logger.info("invite.join_rejected", extra={"code": code, "user_id": payload.user_id, "status": invite.status})
+        logger.info("invite.join_rejected", extra={"user_id": joiner_user_id, "status": invite.status})
         raise HTTPException(status_code=409, detail="Invite is not pending")
-    if invite.creator_user_id == payload.user_id:
-        logger.info("invite.self_join_rejected", extra={"code": code, "user_id": payload.user_id})
+    if invite.creator_user_id == joiner_user_id:
+        logger.info("invite.self_join_rejected", extra={"user_id": joiner_user_id})
         raise HTTPException(status_code=403, detail="Creator cannot join their own invite")
-    require_user(db, payload.user_id)
+    require_user(db, joiner_user_id)
 
     game = GameORM(
         id=new_id(),
         player_1_id=invite.creator_user_id,
-        player_2_id=payload.user_id,
+        player_2_id=joiner_user_id,
         current_turn_user_id=invite.creator_user_id,
     )
-    invite.status = InviteStatus.accepted.value
-    invite.accepted_by_user_id = payload.user_id
-    invite.accepted_at = now()
-    invite.game_id = game.id
     db.add(game)
-    db.flush()
-    add_event(db, game.id, "game.created", {"player_1_id": game.player_1_id, "player_2_id": game.player_2_id, "invite_code": code})
-    add_event(db, game.id, "invite.accepted", {"code": code}, user_id=payload.user_id)
+    try:
+        db.flush()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="Invite could not be joined") from exc
+    accepted_at = now()
+    transition = db.execute(
+        update(GameInviteORM)
+        .where(
+            GameInviteORM.code == code,
+            GameInviteORM.status == InviteStatus.pending.value,
+            GameInviteORM.expires_at >= accepted_at,
+        )
+        .values(
+            status=InviteStatus.accepted.value,
+            accepted_by_user_id=joiner_user_id,
+            accepted_at=accepted_at,
+            game_id=game.id,
+            updated_at=accepted_at,
+        )
+        .execution_options(synchronize_session=False)
+    )
+    if transition.rowcount != 1:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="Invite is not pending")
+    add_event(db, game.id, "game.created", {"player_1_id": game.player_1_id, "player_2_id": game.player_2_id})
+    add_event(db, game.id, "invite.accepted", {}, user_id=joiner_user_id)
     notify_user(
         db,
         invite.creator_user_id,
@@ -651,15 +872,18 @@ def join_invite(db: Session, code: str, payload: InviteJoin) -> Game:
     )
     db.commit()
     db.refresh(game)
-    return to_game_schema(db, game, viewer_user_id=payload.user_id)
+    return to_game_schema(db, game, viewer_user_id=joiner_user_id)
 
 
 def register_device_token(db: Session, payload: DeviceTokenRegister) -> DeviceToken:
-    require_user(db, payload.user_id)
+    user_id = payload.user_id
+    if not user_id:
+        raise HTTPException(status_code=422, detail="User is required")
+    require_user(db, user_id)
     existing = (
         db.execute(
             select(DeviceTokenORM).where(
-                DeviceTokenORM.user_id == payload.user_id,
+                DeviceTokenORM.user_id == user_id,
                 DeviceTokenORM.provider == payload.provider,
                 DeviceTokenORM.token == payload.token,
             )
@@ -667,14 +891,14 @@ def register_device_token(db: Session, payload: DeviceTokenRegister) -> DeviceTo
         .scalars()
         .first()
     )
-    token = existing or DeviceTokenORM(id=new_id(), user_id=payload.user_id, provider=payload.provider, token=payload.token)
+    token = existing or DeviceTokenORM(id=new_id(), user_id=user_id, provider=payload.provider, token=payload.token)
     token.platform = payload.platform
     token.status = "active"
     token.updated_at = now()
     db.add(token)
     db.commit()
     db.refresh(token)
-    logger.info("device_token.registered", extra={"user_id": payload.user_id, "provider": payload.provider, "platform": payload.platform})
+    logger.info("device_token.registered", extra={"user_id": user_id, "provider": payload.provider, "platform": payload.platform})
     return to_device_token_schema(token)
 
 
@@ -765,7 +989,7 @@ def load_round_orm(db: Session, round_id: str) -> RoundORM:
 
 
 def load_invite(db: Session, code: str) -> GameInviteORM:
-    invite = db.get(GameInviteORM, code.upper())
+    invite = db.get(GameInviteORM, code)
     if not invite:
         raise HTTPException(status_code=404, detail="Invite not found")
     return invite
@@ -782,12 +1006,11 @@ def refresh_invite_expiry(db: Session, invite: GameInviteORM) -> None:
 
 
 def generate_invite_code(db: Session) -> str:
-    alphabet = string.ascii_uppercase + string.digits
     for _ in range(20):
-        code = "".join(random.choice(alphabet) for _ in range(6))
+        code = secrets.token_urlsafe(24)
         if not db.get(GameInviteORM, code):
             return code
-    return new_id()[:8].upper()
+    raise HTTPException(status_code=503, detail="Could not create an invite")
 
 
 def latest_round_orm(db: Session, game_id: str) -> Optional[RoundORM]:
@@ -830,7 +1053,6 @@ def to_game_schema(db: Session, game: GameORM, viewer_user_id: Optional[str] = N
                 "requested_game_id": game.id,
                 "selected_round_id": latest.id,
                 "selected_round_game_id": latest.game_id,
-                "selected_round_original_prompt": latest.original_prompt,
                 "selected_round_created_at": str(latest.created_at),
             }
         )
@@ -857,10 +1079,10 @@ def to_game_schema(db: Session, game: GameORM, viewer_user_id: Optional[str] = N
 def should_reveal_prompt(round_record: Optional[RoundORM], viewer_user_id: Optional[str]) -> bool:
     if not round_record:
         return True
-    if not viewer_user_id:
-        return True
     if round_record.status == RoundStatus.guessed.value:
         return True
+    if not viewer_user_id:
+        return False
     return viewer_user_id == round_record.creator_user_id
 
 
@@ -935,6 +1157,15 @@ def to_invite_schema(invite: GameInviteORM) -> GameInvite:
         accepted_at=serialize_dt(invite.accepted_at),
         created_at=serialize_dt(invite.created_at) or "",
         updated_at=serialize_dt(invite.updated_at) or "",
+    )
+
+
+def to_invite_preview_schema(invite: GameInviteORM) -> GameInvitePreview:
+    return GameInvitePreview(
+        code=invite.code,
+        creator_user_id=invite.creator_user_id,
+        status=invite.status,
+        expires_at=serialize_dt(invite.expires_at) or "",
     )
 
 

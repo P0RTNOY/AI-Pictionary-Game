@@ -82,12 +82,15 @@ export type GameEvent = {
   created_at: string;
 };
 
-export type GameInvite = {
+export type GameInvitePreview = {
   code: string;
   creator_user_id: string;
-  game_id: string | null;
   status: "pending" | "accepted" | "expired";
   expires_at: string;
+};
+
+export type GameInvite = GameInvitePreview & {
+  game_id: string | null;
   accepted_by_user_id: string | null;
   accepted_at: string | null;
   created_at: string;

@@ -390,8 +390,8 @@ async def test_cross_game_latest_round_selection_regression(db_session, monkeypa
     db_session.expire_all()
     
     # Fetch games
-    fetched_game_a = services.get_game(db_session, game_a.id)
-    fetched_game_b = services.get_game(db_session, game_b.id)
+    fetched_game_a = services.get_game(db_session, game_a.id, user_id=player_1.id)
+    fetched_game_b = services.get_game(db_session, game_b.id, user_id=player_1.id)
     
     # Verify Game A has Game A's round and prompt
     assert fetched_game_a.latest_round is not None

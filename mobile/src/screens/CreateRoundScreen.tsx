@@ -54,7 +54,7 @@ export function CreateRoundScreen({
     console.log("CreateRoundScreen - POST payload:", { game_id: game.id, creator_user_id: userId, prompt: finalPrompt });
     captureMessage("Round prompt submitted", { area: "round_create", gameId: game.id, creatorUserId: userId, finalPrompt });
     try {
-      const round = await createRound(game.id, userId, finalPrompt);
+      const round = await createRound(game.id, finalPrompt);
       console.log("CreateRoundScreen - Created Round ID:", round.id);
       console.log("CreateRoundScreen - Created Round Original Prompt:", round.original_prompt);
       captureMessage("Round created from prompt", {

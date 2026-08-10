@@ -53,7 +53,7 @@ export function GuessScreen({
   async function submitConfirmed() {
     setLoading(true);
     try {
-      const result = await submitGuess(round.id, userId, guess.trim(), visibleCount);
+      const result = await submitGuess(round.id, guess.trim(), visibleCount);
       onResult(result);
     } catch (error) {
       Alert.alert("Could not score guess", error instanceof Error ? error.message : "Unknown error");

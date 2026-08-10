@@ -1,22 +1,20 @@
 import { useEffect, useRef, useState } from "react";
-import { API_URL } from "../api/client";
+import { API_URL, getApiCredential } from "../api/client";
 import { listEvents } from "../api/games";
 import type { GameEvent } from "../types/game";
 import { captureError, captureMessage } from "../utils/errorReporter";
 
-function wsUrl(gameId: string, userId: string, afterId: number) {
+function wsUrl(gameId: string, accessToken: string, afterId: number) {
   const base = API_URL.replace(/^http/, "ws");
-  return `${base}/ws/games/${gameId}?user_id=${encodeURIComponent(userId)}&after_id=${afterId}`;
+  return `${base}/ws/games/${gameId}?access_token=${encodeURIComponent(accessToken)}&after_id=${afterId}`;
 }
 
 export function useGameEvents({
   gameId,
-  userId,
   enabled,
   onEvents,
 }: {
   gameId: string | null;
-  userId: string | null;
   enabled: boolean;
   onEvents: (events: GameEvent[]) => void;
 }) {
@@ -29,9 +27,10 @@ export function useGameEvents({
   const reconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
-    if (!enabled || !gameId || !userId) return;
+    const accessToken = getApiCredential();
+    if (!enabled || !gameId || !accessToken) return;
     const activeGameId = gameId;
-    const activeUserId = userId;
+    const activeAccessToken = accessToken;
     let socket: WebSocket | null = null;
     let closed = false;
     let failures = 0;
@@ -49,7 +48,7 @@ export function useGameEvents({
     }
 
     function connect() {
-      socket = new WebSocket(wsUrl(activeGameId, activeUserId, lastId.current));
+      socket = new WebSocket(wsUrl(activeGameId, activeAccessToken, lastId.current));
       socket.onopen = () => {
         failures = 0;
         setConnected(true);
@@ -81,7 +80,7 @@ export function useGameEvents({
       if (reconnectTimer.current) clearTimeout(reconnectTimer.current);
       socket?.close();
     };
-  }, [enabled, gameId, userId, onEvents]);
+  }, [enabled, gameId, onEvents]);
 
   useEffect(() => {
     if (!fallbackPolling || !enabled || !gameId) return;

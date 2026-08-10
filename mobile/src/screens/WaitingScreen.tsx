@@ -37,7 +37,7 @@ export function WaitingScreen({
   async function retry() {
     setLoading(true);
     try {
-      const updated = await retryGeneration(round.id, userId);
+      const updated = await retryGeneration(round.id);
       onRetry(updated);
     } catch (error) {
       Alert.alert("Could not retry artists", error instanceof Error ? error.message : "Unknown error");

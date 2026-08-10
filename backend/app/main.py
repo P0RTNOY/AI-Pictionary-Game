@@ -11,10 +11,11 @@ from typing import Optional
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.orm import Session
 
 from app.ai import get_ai_status
-from app.config import CORS_ALLOW_ORIGINS, DEBUG, ENV
+from app.config import CORS_ALLOW_ORIGINS, DEBUG, ENV, is_local_env
 from app.db import get_db, init_db
 from app.models import (
     AIStatus,
@@ -24,6 +25,7 @@ from app.models import (
     GameCreate,
     GameEvent,
     GameInvite,
+    GameInvitePreview,
     GameRoundCreate,
     GameStats,
     GuessCreate,
@@ -37,12 +39,21 @@ from app.models import (
     TestNotificationResponse,
     User,
     UserCreate,
+    UserSession,
     UserUpdate,
 )
 from app import services
+from app.orm_models import User as UserORM
 
 logger = logging.getLogger("ai_pictionary.api")
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
+
+
+def safe_request_path(path: str) -> str:
+    if path.startswith("/invites/"):
+        suffix = "/join" if path.endswith("/join") else ""
+        return f"/invites/{{code}}{suffix}"
+    return path
 
 
 @asynccontextmanager
@@ -61,6 +72,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+bearer_scheme = HTTPBearer(auto_error=False)
+
 
 @app.middleware("http")
 async def request_context_middleware(request: Request, call_next):
@@ -69,7 +82,7 @@ async def request_context_middleware(request: Request, call_next):
     try:
         response = await call_next(request)
     except Exception as exc:
-        logger.exception("request.failed", extra={"request_id": request_id, "path": request.url.path})
+        logger.exception("request.failed", extra={"request_id": request_id, "path": safe_request_path(request.url.path)})
         return JSONResponse(
             status_code=500,
             content={"detail": {"code": "internal_error", "message": "Internal server error", "request_id": request_id}},
@@ -82,7 +95,7 @@ async def request_context_middleware(request: Request, call_next):
         extra={
             "request_id": request_id,
             "method": request.method,
-            "path": request.url.path,
+            "path": safe_request_path(request.url.path),
             "status_code": response.status_code,
             "elapsed_ms": elapsed_ms,
         },
@@ -98,6 +111,33 @@ def health() -> dict[str, str]:
 def require_debug() -> None:
     if ENV == "production" or not DEBUG:
         raise HTTPException(status_code=404, detail="Not found")
+
+
+def require_local_debug() -> None:
+    if not is_local_env(ENV) or not DEBUG:
+        raise HTTPException(status_code=404, detail="Not found")
+
+
+def current_user(
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(bearer_scheme),
+    db: Session = Depends(get_db),
+) -> UserORM:
+    if not credentials or credentials.scheme.lower() != "bearer":
+        raise HTTPException(
+            status_code=401,
+            detail=services.AUTHENTICATION_ERROR,
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    return services.authenticate_access_token(db, credentials.credentials)
+
+
+def require_owner(requested_user_id: str, actor: UserORM) -> None:
+    if requested_user_id != actor.id:
+        raise HTTPException(status_code=403, detail="User can only access their own profile")
+
+
+def invite_attempt_source(request: Request) -> str:
+    return request.client.host if request.client else "unknown"
 
 
 @app.get("/ai/status", response_model=AIStatus)
@@ -140,64 +180,122 @@ def debug_send_test_notification(payload: TestNotificationRequest, db: Session =
     return services.send_debug_test_notification(db, payload.user_id, game_id=payload.game_id)
 
 
-@app.post("/users", response_model=User, status_code=201)
-def create_user(payload: UserCreate, db: Session = Depends(get_db)) -> User:
-    return services.create_user(db, payload)
+@app.post("/users", response_model=UserSession, status_code=201)
+def create_user(payload: UserCreate, db: Session = Depends(get_db)) -> UserSession:
+    return services.create_user_session(db, payload)
 
 
 @app.get("/users/{user_id}", response_model=User)
-def get_user(user_id: str, db: Session = Depends(get_db)) -> User:
+def get_user(
+    user_id: str,
+    actor: UserORM = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> User:
+    require_owner(user_id, actor)
     return services.get_user(db, user_id)
 
 
 @app.patch("/users/{user_id}", response_model=User)
-def update_user(user_id: str, payload: UserUpdate, db: Session = Depends(get_db)) -> User:
+def update_user(
+    user_id: str,
+    payload: UserUpdate,
+    actor: UserORM = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> User:
+    require_owner(user_id, actor)
     return services.update_user(db, user_id, payload)
 
 
-@app.post("/games", response_model=Game, status_code=201)
-def create_game(payload: GameCreate, db: Session = Depends(get_db)) -> Game:
+@app.post(
+    "/games",
+    response_model=Game,
+    status_code=201,
+    dependencies=[Depends(require_local_debug)],
+)
+def create_game(
+    payload: GameCreate,
+    actor: UserORM = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> Game:
+    services.assert_actor_matches(payload.player_1_id, actor.id)
     return services.create_game(db, payload)
 
 
 @app.get("/users/{user_id}/games", response_model=list[Game])
-def list_games(user_id: str, db: Session = Depends(get_db)) -> list[Game]:
+def list_games(
+    user_id: str,
+    actor: UserORM = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> list[Game]:
+    require_owner(user_id, actor)
     return services.list_games_for_user(db, user_id)
 
 
 @app.get("/games/{game_id}", response_model=Game)
-def get_game(game_id: str, user_id: Optional[str] = None, db: Session = Depends(get_db)) -> Game:
-    return services.get_game(db, game_id, user_id=user_id)
+def get_game(
+    game_id: str,
+    actor: UserORM = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> Game:
+    return services.get_game(db, game_id, user_id=actor.id)
 
 
 @app.get("/games/{game_id}/stats", response_model=GameStats)
-def get_game_stats(game_id: str, user_id: str, db: Session = Depends(get_db)) -> GameStats:
-    return services.get_game_stats(db, game_id, user_id=user_id)
+def get_game_stats(
+    game_id: str,
+    actor: UserORM = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> GameStats:
+    return services.get_game_stats(db, game_id, user_id=actor.id)
 
 
 @app.get("/games/{game_id}/events", response_model=list[GameEvent])
-def get_game_events(game_id: str, after_id: int = 0, db: Session = Depends(get_db)) -> list[GameEvent]:
-    return services.list_events(db, game_id, after_id=after_id)
+def get_game_events(
+    game_id: str,
+    after_id: int = 0,
+    actor: UserORM = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> list[GameEvent]:
+    return services.list_events(db, game_id, after_id=after_id, user_id=actor.id)
 
 
 @app.post("/invites", response_model=GameInvite, status_code=201)
-def create_invite(payload: InviteCreate, db: Session = Depends(get_db)) -> GameInvite:
-    return services.create_invite(db, payload)
+def create_invite(
+    payload: InviteCreate,
+    actor: UserORM = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> GameInvite:
+    services.assert_actor_matches(payload.creator_user_id, actor.id)
+    return services.create_invite(db, payload.model_copy(update={"creator_user_id": actor.id}))
 
 
-@app.get("/invites/{code}", response_model=GameInvite)
-def get_invite(code: str, db: Session = Depends(get_db)) -> GameInvite:
-    return services.get_invite(db, code)
+@app.get("/invites/{code}", response_model=GameInvitePreview)
+def get_invite(code: str, request: Request, db: Session = Depends(get_db)) -> GameInvitePreview:
+    services.check_invite_attempt(invite_attempt_source(request))
+    return services.get_invite_preview(db, code)
 
 
 @app.post("/invites/{code}/join", response_model=Game, status_code=201)
-def join_invite(code: str, payload: InviteJoin, db: Session = Depends(get_db)) -> Game:
-    return services.join_invite(db, code, payload)
+def join_invite(
+    code: str,
+    payload: InviteJoin,
+    request: Request,
+    actor: UserORM = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> Game:
+    services.check_invite_attempt(invite_attempt_source(request))
+    services.assert_actor_matches(payload.user_id, actor.id)
+    return services.join_invite(db, code, payload.model_copy(update={"user_id": actor.id}))
 
 
 @app.post("/device-tokens", response_model=DeviceToken, status_code=201)
-def register_device_token(payload: DeviceTokenRegister, db: Session = Depends(get_db)) -> DeviceToken:
-    return services.register_device_token(db, payload)
+def register_device_token(
+    payload: DeviceTokenRegister,
+    actor: UserORM = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> DeviceToken:
+    services.assert_actor_matches(payload.user_id, actor.id)
+    return services.register_device_token(db, payload.model_copy(update={"user_id": actor.id}))
 
 
 @app.post("/games/{game_id}/rounds", response_model=Round, status_code=201)
@@ -205,25 +303,44 @@ async def create_game_round(
     game_id: str,
     payload: GameRoundCreate,
     background_tasks: BackgroundTasks,
+    actor: UserORM = Depends(current_user),
     db: Session = Depends(get_db),
 ) -> Round:
-    if DEBUG:
-        logger.info("request.payload", extra={"game_id": game_id, "payload": payload.model_dump()})
-    round_record = services.create_round_for_game(db, game_id, payload)
+    services.assert_actor_matches(payload.creator_user_id, actor.id)
+    round_record = services.create_round_for_game(
+        db,
+        game_id,
+        payload.model_copy(update={"creator_user_id": actor.id}),
+    )
     background_tasks.add_task(services.generate_round_svgs, round_record.id)
     return round_record
 
 
-@app.post("/rounds", response_model=Round, status_code=201)
-async def create_round_endpoint(payload: RoundCreate, background_tasks: BackgroundTasks, db: Session = Depends(get_db)) -> Round:
+@app.post(
+    "/rounds",
+    response_model=Round,
+    status_code=201,
+    dependencies=[Depends(require_local_debug)],
+)
+async def create_round_endpoint(
+    payload: RoundCreate,
+    background_tasks: BackgroundTasks,
+    actor: UserORM = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> Round:
+    services.assert_actor_matches(payload.creator_user_id, actor.id)
     round_record = services.create_legacy_round(db, payload)
     background_tasks.add_task(services.generate_round_svgs, round_record.id)
     return round_record
 
 
 @app.get("/rounds/{round_id}", response_model=Round)
-def get_round(round_id: str, user_id: Optional[str] = None, db: Session = Depends(get_db)) -> Round:
-    return services.get_round_for_user(db, round_id, user_id=user_id)
+def get_round(
+    round_id: str,
+    actor: UserORM = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> Round:
+    return services.get_round_for_user(db, round_id, user_id=actor.id)
 
 
 @app.post("/rounds/{round_id}/retry-generation", response_model=Round)
@@ -231,43 +348,62 @@ async def retry_round_generation(
     round_id: str,
     payload: RetryGenerationRequest,
     background_tasks: BackgroundTasks,
+    actor: UserORM = Depends(current_user),
     db: Session = Depends(get_db),
 ) -> Round:
-    round_record = services.prepare_generation_retry(db, round_id, payload.user_id)
+    services.assert_actor_matches(payload.user_id, actor.id)
+    round_record = services.prepare_generation_retry(db, round_id, actor.id)
     background_tasks.add_task(services.generate_round_svgs, round_id)
     return round_record
 
 
 @app.post("/rounds/{round_id}/guess", response_model=GuessResult)
-async def guess_round(round_id: str, payload: GuessCreate, db: Session = Depends(get_db)) -> GuessResult:
+async def guess_round(
+    round_id: str,
+    payload: GuessCreate,
+    actor: UserORM = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> GuessResult:
+    services.assert_actor_matches(payload.user_id, actor.id)
     return services.submit_guess(
         db,
         round_id,
         payload.guess_text,
-        user_id=payload.user_id,
+        user_id=actor.id,
         clue_count_used=payload.clue_count_used,
     )
 
 
 @app.websocket("/ws/games/{game_id}")
 async def game_events_websocket(websocket: WebSocket, game_id: str) -> None:
-    await websocket.accept()
-    last_event_id = int(websocket.query_params.get("after_id", "0"))
-    user_id = websocket.query_params.get("user_id")
+    access_token = websocket.query_params.get("access_token")
+    if not access_token:
+        await websocket.close(code=1008)
+        return
+    try:
+        last_event_id = max(0, int(websocket.query_params.get("after_id", "0")))
+    except ValueError:
+        await websocket.close(code=1008)
+        return
     try:
         with services.SessionLocal() as db:
+            actor = services.authenticate_access_token(db, access_token)
             game = db.get(services.GameORM, game_id)
             if not game:
-                await websocket.send_json({"type": "error", "message": "Game not found"})
-                await websocket.close(code=1008)
-                return
-            if user_id:
-                services.require_game_participant(game, user_id)
+                raise HTTPException(status_code=404, detail="Game not found")
+            services.require_game_participant(game, actor.id)
+            user_id = actor.id
+    except HTTPException:
+        await websocket.close(code=1008)
+        return
+
+    await websocket.accept()
+    try:
         await websocket.send_json({"type": "connected", "game_id": game_id, "after_id": last_event_id})
         logger.info("websocket.connected", extra={"game_id": game_id, "user_id": user_id})
         while True:
             with services.SessionLocal() as db:
-                events = services.list_events(db, game_id, after_id=last_event_id)
+                events = services.list_events(db, game_id, after_id=last_event_id, user_id=user_id)
             for event in events:
                 last_event_id = event.id
                 await websocket.send_json({"type": "event", "event": event.model_dump()})

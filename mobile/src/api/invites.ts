@@ -1,20 +1,20 @@
 import { apiFetch } from "./client";
-import type { Game, GameInvite } from "../types/game";
+import type { Game, GameInvite, GameInvitePreview } from "../types/game";
 
-export function createInvite(creatorUserId: string): Promise<GameInvite> {
+export function createInvite(): Promise<GameInvite> {
   return apiFetch<GameInvite>("/invites", {
     method: "POST",
-    body: JSON.stringify({ creator_user_id: creatorUserId }),
+    body: JSON.stringify({}),
   });
 }
 
-export function getInvite(code: string): Promise<GameInvite> {
-  return apiFetch<GameInvite>(`/invites/${code.toUpperCase()}`);
+export function getInvite(code: string): Promise<GameInvitePreview> {
+  return apiFetch<GameInvitePreview>(`/invites/${encodeURIComponent(code)}`);
 }
 
-export function joinInvite(code: string, userId: string): Promise<Game> {
-  return apiFetch<Game>(`/invites/${code.toUpperCase()}/join`, {
+export function joinInvite(code: string): Promise<Game> {
+  return apiFetch<Game>(`/invites/${encodeURIComponent(code)}/join`, {
     method: "POST",
-    body: JSON.stringify({ user_id: userId }),
+    body: JSON.stringify({}),
   });
 }
