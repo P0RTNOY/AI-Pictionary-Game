@@ -2,7 +2,7 @@
 
 - Evidence date: 2026-08-10
 - Candidate branch: `codex/beta-release-readiness`
-- Implementation SHA inspected before the final Task 8 evidence update: `284cd15`
+- Implementation SHA inspected before the final Task 8 evidence update: `f69dceb`
 - Final candidate SHA: `<update after Task 8 final validation>`
 - Verified remote branch: `<update after push>`
 - Pull request: `<update with URL, or record unavailable>`
