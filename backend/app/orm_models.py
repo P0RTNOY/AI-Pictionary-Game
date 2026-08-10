@@ -75,6 +75,17 @@ class GameInvite(TimestampMixin, Base):
 
 class DeviceToken(TimestampMixin, Base):
     __tablename__ = "device_tokens"
+    __table_args__ = (
+        Index(
+            "uq_device_tokens_active_provider_token",
+            "provider",
+            "token",
+            unique=True,
+            sqlite_where=text("status = 'active'"),
+            postgresql_where=text("status = 'active'"),
+        ),
+        Index("ix_device_tokens_user_status", "user_id", "status"),
+    )
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     user_id: Mapped[str] = mapped_column(String(64), ForeignKey("users.id"), nullable=False)

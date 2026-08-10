@@ -13,3 +13,10 @@ export function sendTestNotification(userId: string, gameId?: string | null): Pr
     body: JSON.stringify({ user_id: userId, game_id: gameId ?? null }),
   });
 }
+
+export function resetBackendData(): Promise<{ deleted_rows: number; ok: boolean }> {
+  return apiFetch<{ deleted_rows: number; ok: boolean }>("/debug/reset-local-data", {
+    method: "POST",
+    body: JSON.stringify({ confirmation: "RESET LOCAL DATA" }),
+  });
+}

@@ -51,6 +51,7 @@ export default function App() {
   const [refreshing, setRefreshing] = useState(false);
   const [startupError, setStartupError] = useState<string | null>(null);
   const [startupLoading, setStartupLoading] = useState(false);
+  const [sessionRetiring, setSessionRetiring] = useState(false);
   const lastHandledUrl = useRef<string | null>(null);
 
   useEffect(() => {
@@ -79,7 +80,7 @@ export default function App() {
   }, [user?.id, pendingInviteCode]);
 
   useEffect(() => {
-    if (!selectedGame) return;
+    if (!selectedGame || sessionRetiring) return;
     const interval = setInterval(async () => {
       try {
         if (!user) return;
@@ -92,7 +93,7 @@ export default function App() {
       }
     }, 5000);
     return () => clearInterval(interval);
-  }, [selectedGame?.id, user?.id, screen]);
+  }, [selectedGame?.id, user?.id, screen, sessionRetiring]);
 
   useEffect(() => {
     const subscription = AppState.addEventListener("change", (state) => {
@@ -125,10 +126,10 @@ export default function App() {
 
   const realtimeStatus = useGameEvents({
     gameId: selectedGame?.id ?? null,
-    enabled: Boolean(selectedGame && user),
+    enabled: Boolean(selectedGame && user && !sessionRetiring),
     onEvents: handleGameEvents,
   });
-  const pushStatus = usePushNotifications(user?.id ?? null, openGameById);
+  const pushStatus = usePushNotifications(user?.id ?? null, openGameById, !sessionRetiring);
 
   const showHeader = screen !== "onboarding" && screen !== "profile_setup";
   const showBack = Boolean(user && screen !== "home");
@@ -287,6 +288,41 @@ export default function App() {
     }
   }
 
+  async function handleLocalStateReset() {
+    await retireSessionAndResetClient(true);
+  }
+
+  async function handleBackendDataReset() {
+    await retireSessionAndResetClient(false);
+  }
+
+  async function retireSessionAndResetClient(unregisterPush: boolean) {
+    setSessionRetiring(true);
+    let resetError: unknown = null;
+    try {
+      if (unregisterPush) await pushStatus.unregisterCurrentToken();
+      await clearStoredSession();
+      await AsyncStorage.removeItem(ONBOARDING_KEY);
+    } catch (error) {
+      resetError = error;
+    } finally {
+      configureApiCredential(null);
+      setUser(null);
+      setSelectedGame(null);
+      setSelectedRound(null);
+      setSelectedStats(null);
+      setGames([]);
+      setPendingInviteCode(null);
+      setSelectedGameError(null);
+      setSelectedGameLoading(false);
+      setRefreshing(false);
+      lastHandledUrl.current = null;
+      setScreen("onboarding");
+      setSessionRetiring(false);
+    }
+    if (resetError) throw resetError;
+  }
+
   async function handleInviteJoined(game: Game) {
     setPendingInviteCode(null);
     if (!user) return;
@@ -432,6 +468,8 @@ export default function App() {
             diagnostics={appDiagnostics()}
             backendHealth={backendHealth}
             onRefreshBackendHealth={refreshBackendHealth}
+            onResetLocalState={handleLocalStateReset}
+            onBackendResetComplete={handleBackendDataReset}
             aiStatus={aiStatus}
             info={{
               realtimeConnected: realtimeStatus.connected,
@@ -439,7 +477,8 @@ export default function App() {
               lastEventId: realtimeStatus.lastEventId,
               lastEventType: realtimeStatus.lastEventType,
               pushPermissionStatus: pushStatus.permissionStatus,
-              pushToken: pushStatus.registeredToken,
+              pushRegistered: pushStatus.registered,
+              pushTokenFingerprint: pushStatus.tokenFingerprint,
               pushError: pushStatus.registrationError,
               refreshPushRegistration: pushStatus.refreshRegistration,
             }}

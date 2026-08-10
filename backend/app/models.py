@@ -207,19 +207,37 @@ class WebSocketTicket(BaseModel):
 class DeviceTokenRegister(BaseModel):
     user_id: Optional[str] = None
     token: str = Field(min_length=8, max_length=500)
-    provider: str = Field(default="expo", min_length=2, max_length=40)
+    provider: Literal["expo"] = "expo"
     platform: str = Field(default="unknown", min_length=2, max_length=40)
+
+
+class DeviceTokenUnregister(BaseModel):
+    token: str = Field(min_length=8, max_length=500)
+    provider: Literal["expo"] = "expo"
 
 
 class DeviceToken(BaseModel):
     id: str
     user_id: str
     provider: str
-    token: str
+    token_fingerprint: str
     platform: str
     status: str
     created_at: str
     updated_at: str
+
+
+class DeviceTokenUnregisterResponse(BaseModel):
+    unregistered: bool
+
+
+class LocalDataResetRequest(BaseModel):
+    confirmation: Literal["RESET LOCAL DATA"]
+
+
+class LocalDataResetResponse(BaseModel):
+    ok: bool
+    deleted_rows: int = Field(ge=0)
 
 
 class TestNotificationRequest(BaseModel):

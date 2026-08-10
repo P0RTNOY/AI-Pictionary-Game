@@ -21,6 +21,8 @@ from app.models import (
     AIStatus,
     DeviceToken,
     DeviceTokenRegister,
+    DeviceTokenUnregister,
+    DeviceTokenUnregisterResponse,
     Game,
     GameCreate,
     GameEvent,
@@ -34,6 +36,8 @@ from app.models import (
     InviteCodeRequest,
     InviteJoin,
     InviteJoinRequest,
+    LocalDataResetRequest,
+    LocalDataResetResponse,
     RetryGenerationRequest,
     Round,
     RoundCreate,
@@ -168,10 +172,14 @@ def debug_games(limit: int = 100, actor: UserORM = Depends(current_user), db: Se
 @app.get("/debug/notification-outbox")
 def debug_notification_outbox(limit: int = 100, actor: UserORM = Depends(current_user), db: Session = Depends(get_db)) -> dict:
     require_debug()
-    from app.notifications import NOTIFICATION_OUTBOX
+    from app.notifications import notification_outbox_snapshot
 
     return {
-        "outbox": [message.__dict__ for message in NOTIFICATION_OUTBOX if message.user_id == actor.id][-limit:],
+        "outbox": [
+            message.__dict__
+            for message in notification_outbox_snapshot()
+            if message.user_id == actor.id
+        ][-limit:],
         "attempts": services.list_notification_attempts_for_user(db, actor.id, limit=limit),
     }
 
@@ -186,6 +194,19 @@ def debug_send_test_notification(payload: TestNotificationRequest, actor: UserOR
             raise HTTPException(status_code=404, detail="Game not found")
         services.require_game_participant(game, actor.id)
     return services.send_debug_test_notification(db, actor.id, game_id=payload.game_id)
+
+
+@app.post(
+    "/debug/reset-local-data",
+    response_model=LocalDataResetResponse,
+    dependencies=[Depends(require_local_debug)],
+)
+def debug_reset_local_data(
+    payload: LocalDataResetRequest,
+    actor: UserORM = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> LocalDataResetResponse:
+    return services.reset_local_data(db)
 
 
 @app.post("/users", response_model=UserSession, status_code=201)
@@ -321,6 +342,15 @@ def register_device_token(
 ) -> DeviceToken:
     services.assert_actor_matches(payload.user_id, actor.id)
     return services.register_device_token(db, payload.model_copy(update={"user_id": actor.id}))
+
+
+@app.post("/device-tokens/unregister", response_model=DeviceTokenUnregisterResponse)
+def unregister_device_token(
+    payload: DeviceTokenUnregister,
+    actor: UserORM = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> DeviceTokenUnregisterResponse:
+    return services.unregister_device_token(db, actor.id, payload.provider, payload.token)
 
 
 @app.post("/games/{game_id}/rounds", response_model=Round, status_code=201)

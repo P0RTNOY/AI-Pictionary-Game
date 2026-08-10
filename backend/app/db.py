@@ -20,6 +20,8 @@ class Base(DeclarativeBase):
 def init_db() -> None:
     from app import orm_models  # noqa: F401
 
+    if AUTO_CREATE_TABLES and DATABASE_URL.startswith("sqlite"):
+        _reconcile_sqlite_active_device_tokens()
     if AUTO_CREATE_TABLES:
         Base.metadata.create_all(bind=engine)
     if DATABASE_URL.startswith("sqlite"):
@@ -108,6 +110,41 @@ def _apply_sqlite_light_migrations(bind=engine) -> None:
                 "ON websocket_tickets (user_id, game_id)",
             ]
         )
+    if "device_tokens" in inspector.get_table_names():
+        statements.extend(_sqlite_device_token_reconciliation_statements())
     with bind.begin() as connection:
         for statement in statements:
             connection.execute(text(statement))
+
+
+def _reconcile_sqlite_active_device_tokens(bind=engine) -> None:
+    if "device_tokens" not in inspect(bind).get_table_names():
+        return
+    with bind.begin() as connection:
+        for statement in _sqlite_device_token_reconciliation_statements(include_indexes=False):
+            connection.execute(text(statement))
+
+
+def _sqlite_device_token_reconciliation_statements(*, include_indexes: bool = True) -> list[str]:
+    statements = [
+        "CREATE TABLE IF NOT EXISTS task4_device_token_conflict_archive ("
+        "device_token_id VARCHAR(64) PRIMARY KEY, original_status VARCHAR(40) NOT NULL)",
+        "INSERT OR IGNORE INTO task4_device_token_conflict_archive (device_token_id, original_status) "
+        "SELECT id, status FROM (SELECT id, status, ROW_NUMBER() OVER ("
+        "PARTITION BY provider, token ORDER BY updated_at DESC, created_at DESC, id DESC"
+        ") task4_rank FROM device_tokens WHERE status = 'active') ranked WHERE task4_rank > 1",
+        "UPDATE device_tokens SET status = 'inactive' WHERE id IN (SELECT id FROM ("
+        "SELECT id, ROW_NUMBER() OVER (PARTITION BY provider, token ORDER BY "
+        "updated_at DESC, created_at DESC, id DESC) task4_rank FROM device_tokens "
+        "WHERE status = 'active') ranked WHERE task4_rank > 1)",
+    ]
+    if include_indexes:
+        statements.extend(
+            [
+                "CREATE UNIQUE INDEX IF NOT EXISTS uq_device_tokens_active_provider_token "
+                "ON device_tokens (provider, token) WHERE status = 'active'",
+                "CREATE INDEX IF NOT EXISTS ix_device_tokens_user_status "
+                "ON device_tokens (user_id, status)",
+            ]
+        )
+    return statements

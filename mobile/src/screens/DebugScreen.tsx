@@ -1,10 +1,10 @@
 import * as Clipboard from "expo-clipboard";
 import { useState } from "react";
 import { Alert, ScrollView, Text, View } from "react-native";
-import { Bell, ClipboardCopy, RefreshCw } from "lucide-react-native";
+import { Bell, ClipboardCopy, RefreshCw, Trash2 } from "lucide-react-native";
 import { API_URL } from "../api/client";
 import type { AIStatus } from "../api/ai";
-import { sendTestNotification } from "../api/debug";
+import { resetBackendData, sendTestNotification } from "../api/debug";
 import { PrimaryButton, SecondaryButton } from "../components/Buttons";
 import { colors, styles } from "../styles";
 import type { Round, User } from "../types/game";
@@ -15,7 +15,8 @@ export type DebugInfo = {
   lastEventId: number;
   lastEventType: string | null;
   pushPermissionStatus: string;
-  pushToken: string | null;
+  pushRegistered: boolean;
+  pushTokenFingerprint: string | null;
   pushError: string | null;
   refreshPushRegistration: () => void;
 };
@@ -27,6 +28,8 @@ export function DebugScreen({
   diagnostics,
   backendHealth,
   onRefreshBackendHealth,
+  onResetLocalState,
+  onBackendResetComplete,
   aiStatus,
   info,
 }: {
@@ -36,10 +39,14 @@ export function DebugScreen({
   diagnostics: Record<string, unknown>;
   backendHealth: { status: "unknown" | "ok" | "unreachable"; message: string };
   onRefreshBackendHealth: () => void;
+  onResetLocalState: () => Promise<void>;
+  onBackendResetComplete: () => Promise<void>;
   aiStatus: AIStatus | null;
   info: DebugInfo;
 }) {
   const [sending, setSending] = useState(false);
+  const [localResetting, setLocalResetting] = useState(false);
+  const [backendResetting, setBackendResetting] = useState(false);
 
   async function copy() {
     await Clipboard.setStringAsync(
@@ -53,7 +60,14 @@ export function DebugScreen({
           backendHealth,
           diagnostics,
           aiStatus,
-          ...info,
+          realtimeConnected: info.realtimeConnected,
+          fallbackPolling: info.fallbackPolling,
+          lastEventId: info.lastEventId,
+          lastEventType: info.lastEventType,
+          pushPermissionStatus: info.pushPermissionStatus,
+          pushRegistered: info.pushRegistered,
+          pushTokenFingerprint: info.pushTokenFingerprint,
+          pushError: info.pushError,
         },
         null,
         2,
@@ -78,6 +92,61 @@ export function DebugScreen({
       setSending(false);
     }
   }
+
+  function handleResetLocal() {
+    Alert.alert(
+      "Reset local app state?",
+      "This clears this device’s local user/profile/onboarding state. You will return to first launch. Continue?",
+      [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: "Reset",
+          style: "destructive",
+          onPress: async () => {
+            setLocalResetting(true);
+            try {
+              await onResetLocalState();
+            } catch (error) {
+              Alert.alert("Could not reset local state", error instanceof Error ? error.message : "Unknown error");
+            } finally {
+              setLocalResetting(false);
+            }
+          },
+        },
+      ],
+    );
+  }
+
+  function handleResetBackend() {
+    Alert.alert(
+      "Reset backend local data?",
+      "This deletes all local users, games, rounds, invites, events, device tokens and notification attempts from the current backend database. Continue?",
+      [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: "Reset",
+          style: "destructive",
+          onPress: async () => {
+            setBackendResetting(true);
+            try {
+              const res = await resetBackendData();
+              await onBackendResetComplete();
+              Alert.alert("Backend reset successful", `Deleted ${res.deleted_rows} local rows. This device returned to onboarding.`);
+            } catch (error) {
+              Alert.alert("Could not reset backend", error instanceof Error ? error.message : "Unknown error");
+            } finally {
+              setBackendResetting(false);
+            }
+          },
+        },
+      ],
+    );
+  }
+
+  const showBackendReset =
+    backendHealth.status === "ok" &&
+    (diagnostics.appEnv === "development" || diagnostics.appEnv === "local" || diagnostics.appEnv === "test");
+  const resetInProgress = localResetting || backendResetting;
 
   return (
     <ScrollView contentContainerStyle={styles.content}>
@@ -109,12 +178,39 @@ export function DebugScreen({
         <DebugLine label="Realtime" value={info.realtimeConnected ? "WebSocket connected" : info.fallbackPolling ? "Polling fallback" : "Idle"} />
         <DebugLine label="Last event" value={info.lastEventType ? `#${info.lastEventId} ${info.lastEventType}` : "None yet"} />
         <DebugLine label="Push permission" value={info.pushPermissionStatus} />
-        <DebugLine label="Push token" value={info.pushToken ? `Registered (${info.pushToken.slice(0, 24)}...)` : info.pushError || "Not registered"} />
+        <DebugLine
+          label="Push registration"
+          value={
+            info.pushRegistered
+              ? `Registered${info.pushTokenFingerprint ? ` (${info.pushTokenFingerprint})` : ""}`
+              : info.pushError || "Not registered"
+          }
+        />
       </View>
       <PrimaryButton label="Send test notification" icon={<Bell size={20} color={colors.paper} />} onPress={sendPush} loading={sending} />
       <SecondaryButton label="Check backend health" icon={<RefreshCw size={18} color={colors.ink} />} onPress={onRefreshBackendHealth} />
       <SecondaryButton label="Refresh push token" icon={<RefreshCw size={18} color={colors.ink} />} onPress={info.refreshPushRegistration} />
       <SecondaryButton label="Copy full debug info" icon={<ClipboardCopy size={18} color={colors.ink} />} onPress={copy} />
+
+      <View style={{ marginTop: 24, marginBottom: 8 }}>
+        <Text style={[styles.label, { color: colors.coral }]}>Danger Zone</Text>
+      </View>
+      <SecondaryButton
+        label="Reset local app state"
+        icon={<Trash2 size={18} color={colors.coral} />}
+        onPress={handleResetLocal}
+        loading={localResetting}
+        disabled={resetInProgress}
+      />
+      {showBackendReset && (
+        <SecondaryButton
+          label="Reset backend local data"
+          icon={<Trash2 size={18} color={colors.coral} />}
+          onPress={handleResetBackend}
+          loading={backendResetting}
+          disabled={resetInProgress}
+        />
+      )}
     </ScrollView>
   );
 }

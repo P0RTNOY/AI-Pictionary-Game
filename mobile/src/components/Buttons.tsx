@@ -33,17 +33,31 @@ export function PrimaryButton({
   );
 }
 
-export function SecondaryButton({ label, icon, onPress }: { label: string; icon?: React.ReactNode; onPress: () => void }) {
+export function SecondaryButton({
+  label,
+  icon,
+  onPress,
+  disabled,
+  loading,
+}: {
+  label: string;
+  icon?: React.ReactNode;
+  onPress: () => void;
+  disabled?: boolean;
+  loading?: boolean;
+}) {
   return (
     <Pressable
       accessibilityRole="button"
+      accessibilityState={{ disabled: Boolean(disabled || loading) }}
+      disabled={disabled || loading}
       onPress={() => {
         tapHaptic();
         onPress();
       }}
-      style={({ pressed }) => [styles.secondaryButton, pressed && styles.pressed]}
+      style={({ pressed }) => [styles.secondaryButton, (disabled || loading) && styles.disabled, pressed && styles.pressed]}
     >
-      {icon}
+      {loading ? <ActivityIndicator color={colors.ink} /> : icon}
       <Text style={styles.secondaryButtonText}>{label}</Text>
     </Pressable>
   );

@@ -12,12 +12,13 @@ from threading import Lock
 from typing import Any, Optional
 
 from fastapi import HTTPException
-from sqlalchemy import delete, func, or_, select, text, update
+from sqlalchemy import delete, func, inspect, or_, select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
 from app.ai import ARTIST_MODELS, get_ai_provider
 from app.config import (
+    ACTIVE_DEVICE_TOKEN_LIMIT,
     GLOBAL_DAILY_ROUND_LIMIT,
     GLOBAL_GENERATING_ROUND_LIMIT,
     INVITE_ATTEMPT_LIMIT,
@@ -38,8 +39,10 @@ from app.models import (
     InviteCreate,
     InviteJoin,
     InviteStatus,
+    LocalDataResetResponse,
     DeviceToken,
     DeviceTokenRegister,
+    DeviceTokenUnregisterResponse,
     GeneratedSvg,
     GuessResult,
     Round,
@@ -53,11 +56,12 @@ from app.models import (
     UserUpdate,
     WebSocketTicket,
 )
-from app.notifications import get_notification_provider, notify_user
+from app.notifications import deliver_notifications, get_notification_provider, notify_user
 from app.orm_models import DeviceToken as DeviceTokenORM
 from app.orm_models import Game as GameORM
 from app.orm_models import GameEvent as GameEventORM
 from app.orm_models import GameInvite as GameInviteORM
+from app.orm_models import GenerationAdmissionGate as GenerationAdmissionGateORM
 from app.orm_models import GeneratedSvg as GeneratedSvgORM
 from app.orm_models import Guess as GuessORM
 from app.orm_models import NotificationAttempt as NotificationAttemptORM
@@ -498,7 +502,7 @@ def create_round_for_game(
             )
         )
     add_event(db, game.id, "round.created", {"round_id": round_record.id}, user_id=creator_user_id)
-    notify_user(
+    dispatches = notify_user(
         db,
         guesser_user_id,
         "New AI drawing challenge",
@@ -507,6 +511,7 @@ def create_round_for_game(
     )
     if commit:
         db.commit()
+        deliver_notifications(db, dispatches)
     return get_round(db, round_record.id, reveal_prompt=True)
 
 
@@ -632,14 +637,17 @@ async def generate_round_svgs(round_id: str) -> None:
             },
         )
         if done_count:
-            notify_user(
+            dispatches = notify_user(
                 db,
                 round_record.guesser_user_id,
                 "Sketches are ready",
                 "Your AI drawing challenge is ready to guess.",
                 {"game_id": round_record.game_id, "round_id": round_id, "type": "round.ready_to_guess"},
             )
+        else:
+            dispatches = []
         db.commit()
+        deliver_notifications(db, dispatches)
 
 
 def qualified_exception_type(exc: Exception) -> str:
@@ -808,21 +816,22 @@ def submit_guess(db: Session, round_id: str, guess_text: str, user_id: Optional[
     add_event(db, round_record.game_id, "guess.submitted", {"round_id": round_record.id}, user_id=guesser_user_id)
     add_event(db, round_record.game_id, "round.scored", {"round_id": round_record.id, "score": score})
     add_event(db, round_record.game_id, "turn.changed", {"current_turn_user_id": guesser_user_id})
-    notify_user(
+    dispatches = notify_user(
         db,
         round_record.creator_user_id,
         "Your prompt was guessed",
         f"Score: {score}. It is your opponent's turn now.",
         {"game_id": round_record.game_id, "round_id": round_record.id, "type": "guess.submitted"},
     )
-    notify_user(
+    dispatches.extend(notify_user(
         db,
         guesser_user_id,
         "Your turn",
         "Create the next weird prompt.",
         {"game_id": round_record.game_id, "type": "turn.changed"},
-    )
+    ))
     db.commit()
+    deliver_notifications(db, dispatches)
     db.refresh(guess)
     return guess_to_schema(guess)
 
@@ -998,7 +1007,7 @@ def join_invite(db: Session, code: str, payload: InviteJoin) -> Game:
         raise HTTPException(status_code=409, detail="Invite is not pending")
     add_event(db, game.id, "game.created", {"player_1_id": game.player_1_id, "player_2_id": game.player_2_id})
     add_event(db, game.id, "invite.accepted", {}, user_id=joiner_user_id)
-    notify_user(
+    dispatches = notify_user(
         db,
         invite.creator_user_id,
         "Invite accepted",
@@ -1006,6 +1015,7 @@ def join_invite(db: Session, code: str, payload: InviteJoin) -> Game:
         {"game_id": game.id, "type": "invite.accepted"},
     )
     db.commit()
+    deliver_notifications(db, dispatches)
     db.refresh(game)
     return to_game_schema(db, game, viewer_user_id=joiner_user_id)
 
@@ -1015,26 +1025,103 @@ def register_device_token(db: Session, payload: DeviceTokenRegister) -> DeviceTo
     if not user_id:
         raise HTTPException(status_code=422, detail="User is required")
     require_user(db, user_id)
-    existing = (
+    # Serialize registrations for one owner before checking the configurable active-token cap.
+    db.execute(
+        update(UserORM)
+        .where(UserORM.id == user_id)
+        .values(updated_at=UserORM.updated_at)
+        .execution_options(synchronize_session=False)
+    )
+    matching = (
+        db.execute(
+            select(DeviceTokenORM).where(
+                DeviceTokenORM.provider == payload.provider,
+                DeviceTokenORM.token == payload.token,
+            )
+            .order_by(
+                DeviceTokenORM.updated_at.desc(),
+                DeviceTokenORM.created_at.desc(),
+                DeviceTokenORM.id.desc(),
+            )
+        )
+        .scalars()
+        .all()
+    )
+    token = next((candidate for candidate in matching if candidate.user_id == user_id), None)
+    if token is None:
+        token = DeviceTokenORM(
+            id=new_id(),
+            user_id=user_id,
+            provider=payload.provider,
+            token=payload.token,
+        )
+    for candidate in matching:
+        if candidate.id != token.id and candidate.status == "active":
+            candidate.status = "inactive"
+            candidate.updated_at = now()
+    token.platform = payload.platform
+    token.status = "active"
+    token.updated_at = now()
+    db.add(token)
+    try:
+        db.flush()
+        active_tokens = (
+            db.execute(
+                select(DeviceTokenORM)
+                .where(
+                    DeviceTokenORM.user_id == user_id,
+                    DeviceTokenORM.status == "active",
+                )
+                .order_by(
+                    DeviceTokenORM.updated_at.desc(),
+                    DeviceTokenORM.created_at.desc(),
+                    DeviceTokenORM.id.desc(),
+                )
+            )
+            .scalars()
+            .all()
+        )
+        for stale_token in active_tokens[ACTIVE_DEVICE_TOKEN_LIMIT:]:
+            stale_token.status = "inactive"
+            stale_token.updated_at = now()
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="Device token ownership changed; retry registration",
+        ) from exc
+    db.refresh(token)
+    logger.info("device_token.registered", extra={"user_id": user_id, "provider": payload.provider, "platform": payload.platform})
+    return to_device_token_schema(token)
+
+
+def unregister_device_token(
+    db: Session,
+    user_id: str,
+    provider: str,
+    token: str,
+) -> DeviceTokenUnregisterResponse:
+    require_user(db, user_id)
+    record = (
         db.execute(
             select(DeviceTokenORM).where(
                 DeviceTokenORM.user_id == user_id,
-                DeviceTokenORM.provider == payload.provider,
-                DeviceTokenORM.token == payload.token,
+                DeviceTokenORM.provider == provider,
+                DeviceTokenORM.token == token,
+                DeviceTokenORM.status == "active",
             )
         )
         .scalars()
         .first()
     )
-    token = existing or DeviceTokenORM(id=new_id(), user_id=user_id, provider=payload.provider, token=payload.token)
-    token.platform = payload.platform
-    token.status = "active"
-    token.updated_at = now()
-    db.add(token)
+    if not record:
+        return DeviceTokenUnregisterResponse(unregistered=False)
+    record.status = "inactive"
+    record.updated_at = now()
     db.commit()
-    db.refresh(token)
-    logger.info("device_token.registered", extra={"user_id": user_id, "provider": payload.provider, "platform": payload.platform})
-    return to_device_token_schema(token)
+    logger.info("device_token.unregistered", extra={"user_id": user_id, "provider": provider})
+    return DeviceTokenUnregisterResponse(unregistered=True)
 
 
 def send_debug_test_notification(db: Session, user_id: str, game_id: Optional[str] = None) -> TestNotificationResponse:
@@ -1051,14 +1138,57 @@ def send_debug_test_notification(db: Session, user_id: str, game_id: Optional[st
             raise HTTPException(status_code=404, detail="Game not found")
         require_game_participant(game, user_id)
         data["game_id"] = game_id
-    notify_user(db, user_id, "AI Pictionary test", "Push notifications are connected.", data)
+    dispatches = notify_user(db, user_id, "AI Pictionary test", "Push notifications are connected.", data)
     db.commit()
+    deliver_notifications(db, dispatches)
     return TestNotificationResponse(
         user_id=user_id,
         queued=True,
         active_device_tokens=len(active_tokens),
         provider=get_notification_provider().name,
     )
+
+
+def reset_local_data(db: Session) -> LocalDataResetResponse:
+    """Delete local/test data in dependency order and reset process-local debug state."""
+    deletion_order = (
+        NotificationAttemptORM,
+        WebSocketTicketORM,
+        GuessORM,
+        GeneratedSvgORM,
+        RoundORM,
+        GameEventORM,
+        GameInviteORM,
+        DeviceTokenORM,
+        GameORM,
+        UserORM,
+        GenerationAdmissionGateORM,
+    )
+    deleted_rows = 0
+    try:
+        for model in deletion_order:
+            result = db.execute(delete(model).execution_options(synchronize_session=False))
+            deleted_rows += max(result.rowcount or 0, 0)
+
+        table_names = set(inspect(db.get_bind()).get_table_names())
+        for archive_table in (
+            "task3_guess_conflict_archive",
+            "task3_active_round_archive",
+            "task4_device_token_conflict_archive",
+        ):
+            if archive_table in table_names:
+                result = db.execute(text(f"DELETE FROM {archive_table}"))
+                deleted_rows += max(result.rowcount or 0, 0)
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+
+    from app.notifications import clear_notification_outbox
+
+    clear_notification_outbox()
+    reset_invite_attempt_limiter()
+    return LocalDataResetResponse(ok=True, deleted_rows=deleted_rows)
 
 
 def find_or_create_game(db: Session, player_1_id: str, player_2_id: str) -> GameORM:
@@ -1309,7 +1439,7 @@ def to_device_token_schema(token: DeviceTokenORM) -> DeviceToken:
         id=token.id,
         user_id=token.user_id,
         provider=token.provider,
-        token=token.token,
+        token_fingerprint=hashlib.sha256(token.token.encode("utf-8")).hexdigest()[:12],
         platform=token.platform,
         status=token.status,
         created_at=serialize_dt(token.created_at) or "",

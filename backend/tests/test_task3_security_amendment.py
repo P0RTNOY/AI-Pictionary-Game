@@ -299,9 +299,9 @@ def test_debug_routes_are_local_only_and_send_as_authenticated_actor(client, mon
     assert actor["id"] != forged["id"]
 
 
-def test_debug_reset_api_is_not_exposed_even_in_local_debug(client):
+def test_debug_reset_api_requires_explicit_confirmation_in_local_debug(client):
     _, token = onboard(client, "No Reset Actor")
-    assert client.post("/debug/reset-local-data", headers=bearer(token)).status_code == 404
+    assert client.post("/debug/reset-local-data", headers=bearer(token)).status_code == 422
 
 
 def test_debug_reset_service_is_not_part_of_task3():
