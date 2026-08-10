@@ -5,6 +5,7 @@ import logging
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
+from threading import Event
 
 import pytest
 from alembic import command
@@ -147,6 +148,53 @@ def test_websocket_ticket_has_exactly_one_winner_under_concurrent_consumption(cl
         results = list(pool.map(lambda _: consume(), range(2)))
     assert results.count(creator["id"]) == 1
     assert results.count("error:401") == 1
+
+
+def test_websocket_ticket_rotation_wins_against_paused_old_ticket_consumption(client, db_session):
+    creator, creator_token = onboard(client, "CAS Ticket Creator")
+    guesser, _ = onboard(client, "CAS Ticket Guesser")
+    game = services.create_game(db_session, GameCreate(player_1_id=creator["id"], player_2_id=guesser["id"]))
+    old_response = client.post(
+        f"/games/{game.id}/websocket-ticket",
+        headers=bearer(creator_token),
+    )
+    assert old_response.status_code == 201
+    old_ticket = old_response.json()["ticket"]
+    db_session.close()
+
+    old_ticket_selected = Event()
+    rotation_committed = Event()
+
+    def consume_paused_old_ticket() -> str:
+        with SessionLocal() as consuming_db:
+            original_scalar = consuming_db.scalar
+
+            def synchronized_scalar(statement, *args, **kwargs):
+                result = original_scalar(statement, *args, **kwargs)
+                if isinstance(result, WebSocketTicketORM):
+                    old_ticket_selected.set()
+                    assert rotation_committed.wait(timeout=5)
+                return result
+
+            consuming_db.scalar = synchronized_scalar  # type: ignore[method-assign]
+            try:
+                return services.consume_websocket_ticket(consuming_db, old_ticket, game.id)
+            except Exception as exc:  # noqa: BLE001 - assert the generic authentication result
+                return f"error:{getattr(exc, 'status_code', None)}"
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        old_consumer = pool.submit(consume_paused_old_ticket)
+        assert old_ticket_selected.wait(timeout=5)
+        try:
+            with SessionLocal() as issuing_db:
+                new_ticket = services.issue_websocket_ticket(issuing_db, game.id, creator["id"]).ticket
+        finally:
+            rotation_committed.set()
+        old_outcome = old_consumer.result(timeout=5)
+
+    assert old_outcome == "error:401"
+    with SessionLocal() as verification_db:
+        assert services.consume_websocket_ticket(verification_db, new_ticket, game.id) == creator["id"]
 
 
 def test_websocket_ticket_rotation_cleanup_indexes_and_concurrent_issuance_are_bounded(client, db_session):

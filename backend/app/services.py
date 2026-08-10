@@ -156,6 +156,7 @@ def consume_websocket_ticket(db: Session, raw_ticket: str, game_id: str) -> str:
         update(WebSocketTicketORM)
         .where(
             WebSocketTicketORM.id == ticket.id,
+            WebSocketTicketORM.ticket_hash == ticket_hash,
             WebSocketTicketORM.consumed_at.is_(None),
             WebSocketTicketORM.expires_at >= consumed_at,
         )
