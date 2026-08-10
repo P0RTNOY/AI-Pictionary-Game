@@ -30,7 +30,8 @@ import { createSessionEpoch } from "./src/sessionEpoch";
 import { createRequestScope } from "./src/requestScope";
 import { createLatestTargetCoordinator, type LatestTargetCoordinator } from "./src/latestTargetCoordinator";
 import { createLatestOperation } from "./src/latestOperation";
-import { isActionContextCurrent, type ActionContext } from "./src/actionContext";
+import { createActionContextGuard, isActionContextCurrent, type ActionContext } from "./src/actionContext";
+import { retireGameOpenState, type GameOpenRetirementMode } from "./src/gameOpenState";
 
 type Screen = "onboarding" | "home" | "profile_setup" | "edit_profile" | "invites" | "create_round" | "waiting" | "guess" | "result" | "debug" | "startup_error";
 
@@ -71,17 +72,20 @@ export default function App() {
   const selectedGameRef = useRef<Game | null>(null);
   const selectedRoundRef = useRef<Round | null>(null);
   const screenRef = useRef<Screen>(screen);
+  const pendingGameRef = useRef<string | null>(null);
   const openingGameRef = useRef<string | null>(null);
   const mountedRef = useRef(true);
   const gamesRefreshGeneration = useRef(0);
   const statsRefreshGeneration = useRef(0);
   const actionLifecycleEpochRef = useRef(0);
+  const gameOpenRetirementGenerationRef = useRef(0);
   const selectedRefreshOperation = useRef(createLatestOperation(setSelectedGameLoading)).current;
   const gameOpenCoordinatorRef = useRef<LatestTargetCoordinator<GameOpenTarget, Game> | null>(null);
   userRef.current = user;
   selectedGameRef.current = selectedGame;
   selectedRoundRef.current = selectedRound;
   screenRef.current = screen;
+  pendingGameRef.current = pendingGameId;
   const appIsActive = appState === "active";
   const renderedActionContext: ActionContext = {
     epoch: actionLifecycleEpoch,
@@ -96,9 +100,6 @@ export default function App() {
       run: async (target, signal) => {
         retireActionWork();
         retireGameWork();
-        openingGameRef.current = target.gameId;
-        setPendingGameId(target.gameId);
-        setOpeningGameId(target.gameId);
         return getGame(target.gameId, signal);
       },
       accept: (target, game) => {
@@ -123,7 +124,7 @@ export default function App() {
       identityRequests.retire();
       gameRequests.retire();
       selectedRefreshOperation.retire();
-      gameOpenCoordinatorRef.current?.retire();
+      retireGameOpenWork("clear-pending");
     };
   }, []);
 
@@ -183,10 +184,8 @@ export default function App() {
         identityRequests.retire();
         gameRequests.retire();
         selectedRefreshOperation.retire();
-        gameOpenCoordinatorRef.current?.retire();
+        retireGameOpenWork("preserve-pending");
         retireActionWork();
-        openingGameRef.current = null;
-        setOpeningGameId(null);
       }
     });
     return () => subscription.remove();
@@ -204,17 +203,20 @@ export default function App() {
       const activeUser = userRef.current;
       if (!activeUser) return;
       if (AppState.currentState !== "active") {
-        setPendingGameId(gameId);
+        queuePendingGame(gameId);
         return;
       }
+      queuePendingGame(gameId);
+      openingGameRef.current = gameId;
+      setOpeningGameId(gameId);
+      const retirementGeneration = gameOpenRetirementGenerationRef.current;
       await gameOpenCoordinatorRef.current?.request({
         gameId,
         userId: activeUser.id,
         sessionEpoch: sessionEpoch.capture(),
       });
-      if (openingGameRef.current !== gameId) {
-        setPendingGameId((pending) => (pending === gameId ? null : pending));
-      }
+      if (retirementGeneration !== gameOpenRetirementGenerationRef.current) return;
+      if (openingGameRef.current === gameId) clearGameOpenState(gameId);
     },
     [],
   );
@@ -322,10 +324,9 @@ export default function App() {
     if (!link) return;
     captureMessage("App deep link received", { area: "deep_link", kind: link.kind });
     if (link.kind === "invite") {
-      setPendingGameId(null);
+      retireGameOpenWork("clear-pending");
       setPendingInviteCode(link.code);
       if (userRef.current) {
-        gameOpenCoordinatorRef.current?.retire();
         retireActionWork();
         retireGameWork();
         selectedGameRef.current = null;
@@ -337,7 +338,7 @@ export default function App() {
     } else {
       setPendingInviteCode(null);
       if (userRef.current && AppState.currentState === "active") void openGameById(link.gameId);
-      else setPendingGameId(link.gameId);
+      else queuePendingGame(link.gameId);
     }
   }
 
@@ -454,7 +455,7 @@ export default function App() {
   async function retireSessionAndResetClient(unregisterPush: boolean) {
     sessionEpoch.retire();
     identityRequests.retire();
-    gameOpenCoordinatorRef.current?.retire();
+    retireGameOpenWork("clear-pending");
     retireActionWork();
     retireGameWork();
     userRef.current = null;
@@ -488,6 +489,7 @@ export default function App() {
       setSelectedStats(null);
       setGames([]);
       setPendingInviteCode(null);
+      pendingGameRef.current = null;
       setPendingGameId(null);
       setSelectedGameError(null);
       setSelectedGameLoading(false);
@@ -571,7 +573,7 @@ export default function App() {
 
   function goHome() {
     if (user) refreshGames(user.id);
-    gameOpenCoordinatorRef.current?.retire();
+    retireGameOpenWork("clear-pending");
     retireActionWork();
     retireGameWork();
     selectedGameRef.current = null;
@@ -629,8 +631,30 @@ export default function App() {
     );
   }
 
+  function queuePendingGame(gameId: string) {
+    pendingGameRef.current = gameId;
+    if (mountedRef.current) setPendingGameId(gameId);
+  }
+
+  function retireGameOpenWork(mode: GameOpenRetirementMode) {
+    gameOpenRetirementGenerationRef.current += 1;
+    gameOpenCoordinatorRef.current?.retire();
+    const next = retireGameOpenState(
+      { pendingGameId: pendingGameRef.current, openingGameId: openingGameRef.current },
+      mode,
+    );
+    pendingGameRef.current = next.pendingGameId;
+    openingGameRef.current = next.openingGameId;
+    if (!mountedRef.current) return;
+    setPendingGameId(next.pendingGameId);
+    setOpeningGameId(next.openingGameId);
+  }
+
   function clearGameOpenState(gameId: string) {
-    setPendingGameId((pending) => (pending === gameId ? null : pending));
+    if (pendingGameRef.current === gameId) {
+      pendingGameRef.current = null;
+      if (mountedRef.current) setPendingGameId(null);
+    }
     if (openingGameRef.current === gameId) {
       openingGameRef.current = null;
       if (mountedRef.current) setOpeningGameId(null);
@@ -648,13 +672,19 @@ export default function App() {
             user={null}
             lifecycleEpoch={actionLifecycleEpoch}
             onSave={async (payload, signal) => {
+              const profileActionIsCurrent = createActionContextGuard(
+                renderedActionContext,
+                currentActionContext,
+                () => AppState.currentState === "active",
+              );
+              if (!profileActionIsCurrent(signal)) return;
               const session = await createUser(payload.display_name, payload.avatar_emoji, payload.avatar_color, signal);
-              if (signal.aborted) return;
+              if (!profileActionIsCurrent(signal)) return;
               await Promise.all([
                 AsyncStorage.setItem(USER_ID_KEY, session.user.id),
                 AsyncStorage.setItem(SESSION_TOKEN_KEY, session.access_token),
               ]);
-              if (signal.aborted) return;
+              if (!profileActionIsCurrent(signal)) return;
               configureApiCredential(session.access_token);
               sessionEpoch.activate();
               identityRequests.activate(session.user.id);
@@ -683,8 +713,14 @@ export default function App() {
               goHome();
             }}
             onSave={async (payload, signal) => {
+              const profileActionIsCurrent = createActionContextGuard(
+                renderedActionContext,
+                currentActionContext,
+                () => AppState.currentState === "active",
+              );
+              if (!profileActionIsCurrent(signal)) return;
               const updated = await updateUser(user.id, payload, signal);
-              if (signal.aborted) return;
+              if (!profileActionIsCurrent(signal)) return;
               userRef.current = updated;
               setUser(updated);
               setScreen("home");

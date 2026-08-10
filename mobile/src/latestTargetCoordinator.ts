@@ -51,6 +51,7 @@ export function createLatestTargetCoordinator<Target, Result>({
     work = (async () => {
       try {
         await Promise.resolve();
+        if (controller.signal.aborted || generation !== requestGeneration) return null;
         const result = await run(target, controller.signal);
         if (controller.signal.aborted || generation !== requestGeneration) return null;
         const acceptedAt = now();

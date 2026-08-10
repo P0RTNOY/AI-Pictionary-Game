@@ -70,6 +70,21 @@ async function run() {
   await targetB;
   assert.deepEqual(acceptedTargets, ["B"]);
 
+  let retiredBeforeRunCalls = 0;
+  const retireBeforeRun = createLatestTargetCoordinator({
+    key: (target) => target,
+    run: async () => {
+      retiredBeforeRunCalls += 1;
+      return "should-not-run";
+    },
+    accept: () => {},
+    reject: () => {},
+  });
+  const retiredBeforeRunWork = retireBeforeRun.request("A");
+  retireBeforeRun.retire();
+  await retiredBeforeRunWork;
+  assert.equal(retiredBeforeRunCalls, 0, "retiring before the deferred run must prevent the request from starting");
+
   let retryAttempt = 0;
   const retryAccepted = [];
   const retryCoordinator = createLatestTargetCoordinator({
@@ -101,7 +116,21 @@ async function run() {
   refreshB.settle();
   assert.deepEqual(loadingStates, [true, false, true, false]);
 
-  const { isActionContextCurrent } = loadTypeScriptModule("src/actionContext.ts");
+  const { retireGameOpenState } = loadTypeScriptModule("src/gameOpenState.ts");
+  const backgroundedOpen = retireGameOpenState(
+    { pendingGameId: "game-a", openingGameId: "game-a" },
+    "preserve-pending",
+  );
+  assert.deepEqual(backgroundedOpen, { pendingGameId: "game-a", openingGameId: null });
+  let resumedOpenRequests = 0;
+  if (backgroundedOpen.pendingGameId) resumedOpenRequests += 1;
+  assert.equal(resumedOpenRequests, 1, "resume must retry the game retained during background retirement");
+  const homeCancelledOpen = retireGameOpenState(backgroundedOpen, "clear-pending");
+  assert.deepEqual(homeCancelledOpen, { pendingGameId: null, openingGameId: null });
+  if (homeCancelledOpen.pendingGameId) resumedOpenRequests += 1;
+  assert.equal(resumedOpenRequests, 1, "Home must clear and unlock the pending open without re-requesting it");
+
+  const { createActionContextGuard, isActionContextCurrent } = loadTypeScriptModule("src/actionContext.ts");
   const capturedAction = { epoch: 4, userId: "user-a", gameId: "game-a", roundId: "round-a" };
   assert.equal(isActionContextCurrent(capturedAction, capturedAction, true), true);
   assert.equal(
@@ -110,6 +139,25 @@ async function run() {
     "an old-game mutation must be rejected after B opens",
   );
   assert.equal(isActionContextCurrent(capturedAction, capturedAction, false), false, "backgrounding retires actions");
+
+  let profileForeground = true;
+  let profileWrites = 0;
+  const profileSaveResult = deferred();
+  const profileSignal = new AbortController().signal;
+  const profileActionIsCurrent = createActionContextGuard(
+    capturedAction,
+    () => capturedAction,
+    () => profileForeground,
+  );
+  const deferredProfileSave = (async () => {
+    await profileSaveResult.promise;
+    if (profileActionIsCurrent(profileSignal)) profileWrites += 1;
+  })();
+  profileForeground = false;
+  profileSaveResult.resolve();
+  await deferredProfileSave;
+  assert.equal(profileSignal.aborted, false, "the passive screen cleanup has not aborted yet");
+  assert.equal(profileWrites, 0, "a profile save resolving after background must not write state or credentials");
 
   const { createRealtimeFailurePolicy } = loadTypeScriptModule("src/realtimePolicy.ts");
   const flapPolicy = createRealtimeFailurePolicy(2);
@@ -195,6 +243,11 @@ async function run() {
   assert.match(app, /AppStateStatus/);
   assert.match(app, /pendingGameId/);
   assert.match(app, /createLatestTargetCoordinator/);
+  assert.match(app, /retireGameOpenWork\("preserve-pending"\)/);
+  assert.match(app, /retireGameOpenWork\("clear-pending"\)/);
+  assert.match(app, /if \(!user \|\| !pendingGameId \|\| !appIsActive\) return;\s+void openGameById\(pendingGameId\)/);
+  assert.match(app, /gameOpenRetirementGenerationRef/);
+  assert.match(app, /createActionContextGuard/);
   assert.match(app, /retireActionWork/);
   assert.match(app, /selectedRefreshOperation\.retire/);
   assert.match(app, /request\.signal/);

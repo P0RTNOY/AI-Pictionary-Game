@@ -14,3 +14,11 @@ export function isActionContextCurrent(captured: ActionContext, current: ActionC
     captured.roundId === current.roundId
   );
 }
+
+export function createActionContextGuard(
+  captured: ActionContext,
+  current: () => ActionContext,
+  appActive: () => boolean,
+): (signal?: AbortSignal) => boolean {
+  return (signal) => !signal?.aborted && isActionContextCurrent(captured, current(), appActive());
+}
