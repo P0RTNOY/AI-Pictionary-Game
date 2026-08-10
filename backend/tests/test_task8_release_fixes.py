@@ -95,6 +95,7 @@ assert inspect(engine).get_table_names() == []
             "ENV": "unexpected",
             "DEBUG": "true",
             "AUTO_CREATE_TABLES": "true",
+            "CORS_ALLOW_ORIGINS": "*",
             "DATABASE_URL": f"sqlite:///{database_path}",
             "PYTHON_DOTENV_DISABLED": "1",
             "PYTHONPATH": str(Path(__file__).parents[1]),

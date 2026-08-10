@@ -37,8 +37,11 @@ CORS_ALLOW_ORIGINS = [
     for origin in os.getenv("CORS_ALLOW_ORIGINS", CORS_DEFAULT).split(",")
     if origin.strip()
 ]
-if DEBUG and "*" not in CORS_ALLOW_ORIGINS:
-    CORS_ALLOW_ORIGINS.append("*")
+if DEBUG:
+    if "*" not in CORS_ALLOW_ORIGINS:
+        CORS_ALLOW_ORIGINS.append("*")
+else:
+    CORS_ALLOW_ORIGINS = [origin for origin in CORS_ALLOW_ORIGINS if origin != "*"]
 
 NOTIFICATION_PROVIDER = os.getenv("NOTIFICATION_PROVIDER", "mock").lower()
 EXPO_ACCESS_TOKEN = os.getenv("EXPO_ACCESS_TOKEN", "")
