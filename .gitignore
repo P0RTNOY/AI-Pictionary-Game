@@ -4,6 +4,8 @@ __pycache__/
 .env
 node_modules/
 .expo/
+graphify-out/
+.superpowers/sdd/
 dist/
 build/
 *.pyc

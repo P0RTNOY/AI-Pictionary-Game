@@ -2,6 +2,7 @@
   "expo": {
     "name": "AI Pictionary",
     "slug": "ai-pictionary",
+    "description": "Two-player AI sketch duels: write a weird prompt, reveal drawings, and guess for the high score.",
     "version": "0.1.0",
     "runtimeVersion": {
       "policy": "appVersion"
@@ -9,6 +10,12 @@
     "orientation": "portrait",
     "userInterfaceStyle": "light",
     "scheme": "aipictionary",
+    "icon": "./assets/app-icon-v2.png",
+    "splash": {
+      "image": "./assets/app-icon-v2.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#FAF7F0"
+    },
     "assetBundlePatterns": [
       "**/*"
     ],
@@ -22,22 +29,19 @@
     "android": {
       "package": "com.portnoy.aipictionary.beta",
       "adaptiveIcon": {
-        "backgroundColor": "#FAF7F0"
+        "foregroundImage": "./assets/app-icon-v2.png",
+        "backgroundColor": "#F5C84C"
       }
     },
     "plugins": [
       "expo-asset",
-      "expo-notifications"
+      "expo-notifications",
+      "expo-font"
     ],
     "extra": {
       "appEnv": "local",
       "buildProfile": "local",
       "releaseChannel": "local",
-      "todo": {
-        "icon": "Replace placeholder icon before production",
-        "splash": "Add branded splash before production",
-        "bundleIdentifiers": "Replace com.portnoy.aipictionary.beta before production"
-      },
       "eas": {
         "projectId": "36443fdd-ae57-4284-97bb-8bc2faddb2fd"
       }
