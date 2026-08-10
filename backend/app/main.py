@@ -443,7 +443,7 @@ async def retry_round_generation(
 
 
 @app.post("/rounds/{round_id}/guess", response_model=GuessResult)
-async def guess_round(
+def guess_round(
     round_id: str,
     payload: GuessCreate,
     actor: UserORM = Depends(current_user),

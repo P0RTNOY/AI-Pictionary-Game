@@ -9,6 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field
 class RoundStatus(str, Enum):
     generating = "generating"
     ready_to_guess = "ready_to_guess"
+    judging = "judging"
     guessed = "guessed"
     failed = "failed"
 

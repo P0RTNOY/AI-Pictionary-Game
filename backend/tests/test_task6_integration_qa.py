@@ -417,7 +417,7 @@ def test_missing_local_provider_configuration_does_not_block_startup_and_retry_r
 
     with TestClient(app) as client:
         assert startup_entered is True
-        assert client.get("/health").json() == {"status": "ok"}
+        assert client.get("/health").json() == {"status": "ok", "notification_provider": "mock"}
         status = client.get("/ai/status")
         assert status.status_code == 200
         assert status.json()["runtime_provider"] == "local"

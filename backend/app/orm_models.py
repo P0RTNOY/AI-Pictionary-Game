@@ -129,8 +129,8 @@ class Round(TimestampMixin, Base):
             "uq_rounds_one_active_per_game",
             "game_id",
             unique=True,
-            sqlite_where=text("status IN ('generating', 'ready_to_guess')"),
-            postgresql_where=text("status IN ('generating', 'ready_to_guess')"),
+            sqlite_where=text("status IN ('generating', 'ready_to_guess', 'judging')"),
+            postgresql_where=text("status IN ('generating', 'ready_to_guess', 'judging')"),
         ),
     )
 
@@ -141,6 +141,7 @@ class Round(TimestampMixin, Base):
     original_prompt: Mapped[str] = mapped_column(Text, nullable=False)
     status: Mapped[str] = mapped_column(String(40), default="generating", nullable=False)
     clue_reveal_count: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    guess_claim_id: Mapped[Optional[str]] = mapped_column(String(64))
     completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
 
     game: Mapped[Game] = relationship(back_populates="rounds")

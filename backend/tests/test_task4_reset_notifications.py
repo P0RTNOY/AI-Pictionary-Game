@@ -496,11 +496,19 @@ def test_alembic_adopts_task4_objects_created_by_sqlite_startup_compatibility(
         column["name"] for column in before.get_columns("device_tokens")
     }
     assert "device_token_retirements" in before.get_table_names()
+    assert "guess_claim_id" in {
+        column["name"] for column in before.get_columns("rounds")
+    }
+    with compatibility_engine.connect() as connection:
+        active_round_index_sql = connection.execute(
+            text("SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'uq_rounds_one_active_per_game'")
+        ).scalar_one()
+    assert "judging" in active_round_index_sql
 
     command.upgrade(config, "head")
 
     with compatibility_engine.connect() as connection:
-        assert connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == "20260810_0005"
+        assert connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == "20260810_0006"
 
 
 def test_task4_migration_caps_existing_active_tokens_per_user_and_restores_them(

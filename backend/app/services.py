@@ -7,6 +7,7 @@ import secrets
 import time
 import uuid
 from collections import defaultdict, deque
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from threading import Lock
 from typing import Any, Optional
@@ -77,6 +78,7 @@ PUBLIC_GENERATION_ERROR_CODE = "generation_failed"
 PUBLIC_GENERATION_ERROR_MESSAGE = "Drawing generation failed. Please try again."
 AUTHENTICATION_ERROR = "Invalid or missing bearer token"
 INVITE_RATE_LIMIT_ERROR = {"code": "invite_rate_limited", "message": "Too many invite attempts"}
+GUESS_CLAIM_STALE_AFTER_SECONDS = 120
 
 _invite_attempts: dict[str, deque[float]] = defaultdict(deque)
 _invite_attempts_lock = Lock()
@@ -464,7 +466,11 @@ def create_round_for_game(
 
     guesser_user_id = other_player_id(game, creator_user_id)
     active_round = latest_round_orm(db, game.id)
-    if active_round and active_round.status in {RoundStatus.generating.value, RoundStatus.ready_to_guess.value}:
+    if active_round and active_round.status in {
+        RoundStatus.generating.value,
+        RoundStatus.ready_to_guess.value,
+        RoundStatus.judging.value,
+    }:
         raise HTTPException(status_code=409, detail="This game already has an active round")
     enforce_new_round_budgets(db, creator_user_id)
 
@@ -705,6 +711,8 @@ def prepare_generation_retry(db: Session, round_id: str, user_id: str) -> Round:
         raise HTTPException(status_code=409, detail="Cannot retry a round after it has been guessed")
     if round_record.status == RoundStatus.generating.value:
         raise HTTPException(status_code=409, detail="Round generation is already in progress")
+    if round_record.status == RoundStatus.judging.value:
+        raise HTTPException(status_code=409, detail="A guess is currently being scored")
 
     retryable = [svg for svg in round_record.generated_svgs if svg.status != SvgStatus.done.value]
     if not retryable:
@@ -810,8 +818,55 @@ def reveal_next_clue(db: Session, round_id: str, user_id: str) -> Round:
     return get_round_for_user(db, round_id, user_id)
 
 
-def submit_guess(db: Session, round_id: str, guess_text: str, user_id: Optional[str] = None, clue_count_used: int = 1) -> GuessResult:
+@dataclass(frozen=True)
+class GuessClaim:
+    id: str
+    round_id: str
+    game_id: str
+    creator_user_id: str
+    guesser_user_id: str
+    original_prompt: str
+    guess_text: str
+    clue_count_used: int
+
+
+def claim_guess(db: Session, round_id: str, guess_text: str, user_id: Optional[str]) -> GuessClaim:
     round_record = load_round_orm(db, round_id)
+    if round_record.status == RoundStatus.judging.value:
+        stale_before = now() - timedelta(seconds=GUESS_CLAIM_STALE_AFTER_SECONDS)
+        claim_updated_at = round_record.updated_at
+        if claim_updated_at.tzinfo is None:
+            claim_updated_at = claim_updated_at.replace(tzinfo=timezone.utc)
+        if claim_updated_at > stale_before:
+            raise HTTPException(status_code=409, detail="Round is already being scored")
+        recovered = db.execute(
+            update(RoundORM)
+            .where(
+                RoundORM.id == round_id,
+                RoundORM.status == RoundStatus.judging.value,
+                RoundORM.guess_claim_id == round_record.guess_claim_id,
+                RoundORM.updated_at <= stale_before,
+            )
+            .values(
+                status=RoundStatus.ready_to_guess.value,
+                guess_claim_id=None,
+                updated_at=now(),
+            )
+            .execution_options(synchronize_session=False)
+        )
+        if recovered.rowcount == 1:
+            add_event(
+                db,
+                round_record.game_id,
+                "guess.judging_recovered",
+                {"round_id": round_id},
+                user_id=round_record.guesser_user_id,
+            )
+            db.commit()
+            db.expire_all()
+            round_record = load_round_orm(db, round_id)
+        else:
+            db.rollback()
     if round_record.status != RoundStatus.ready_to_guess.value:
         raise HTTPException(status_code=409, detail="Round is not ready for guesses yet")
     if round_record.guesses:
@@ -823,38 +878,110 @@ def submit_guess(db: Session, round_id: str, guess_text: str, user_id: Optional[
     if guesser_user_id == round_record.creator_user_id:
         raise HTTPException(status_code=403, detail="You cannot guess your own prompt")
 
-    completed_at = now()
+    claim_id = new_id()
+    claimed_at = now()
     authoritative_clue_count = db.execute(
         update(RoundORM)
         .where(RoundORM.id == round_id, RoundORM.status == RoundStatus.ready_to_guess.value)
-        .values(status=RoundStatus.guessed.value, completed_at=completed_at, updated_at=completed_at)
+        .values(
+            status=RoundStatus.judging.value,
+            guess_claim_id=claim_id,
+            updated_at=claimed_at,
+        )
         .returning(RoundORM.clue_reveal_count)
     ).scalar_one_or_none()
     if authoritative_clue_count is None:
         db.rollback()
-        raise HTTPException(status_code=409, detail="This round has already been guessed")
+        raise HTTPException(status_code=409, detail="This round is already being scored or has been guessed")
+    add_event(
+        db,
+        round_record.game_id,
+        "guess.judging_started",
+        {"round_id": round_id},
+        user_id=guesser_user_id,
+    )
+    db.commit()
+    return GuessClaim(
+        id=claim_id,
+        round_id=round_id,
+        game_id=round_record.game_id,
+        creator_user_id=round_record.creator_user_id,
+        guesser_user_id=guesser_user_id,
+        original_prompt=round_record.original_prompt,
+        guess_text=guess_text.strip(),
+        clue_count_used=authoritative_clue_count,
+    )
 
+
+def score_guess_claim(claim: GuessClaim) -> dict[str, Any]:
     provider = get_ai_provider()
-    judge = provider.score_guess_sync(round_record.original_prompt, guess_text)
-    penalty = max(0, authoritative_clue_count - 1) * 8
+    judge = provider.score_guess_sync(claim.original_prompt, claim.guess_text)
+    penalty = max(0, claim.clue_count_used - 1) * 8
     score = max(0, int(judge["score"]) - penalty)
-    judge["score"] = score
+    return {**judge, "score": score}
+
+
+def release_guess_claim(db: Session, claim: GuessClaim) -> None:
+    released_at = now()
+    released = db.execute(
+        update(RoundORM)
+        .where(
+            RoundORM.id == claim.round_id,
+            RoundORM.status == RoundStatus.judging.value,
+            RoundORM.guess_claim_id == claim.id,
+        )
+        .values(
+            status=RoundStatus.ready_to_guess.value,
+            guess_claim_id=None,
+            updated_at=released_at,
+        )
+    )
+    if released.rowcount == 1:
+        add_event(
+            db,
+            claim.game_id,
+            "guess.judging_failed",
+            {"round_id": claim.round_id, "message": "Guess scoring failed. Please try again."},
+            user_id=claim.guesser_user_id,
+        )
+    db.commit()
+
+
+def finalize_guess_claim(db: Session, claim: GuessClaim, judge: dict[str, Any]) -> GuessResult:
+    completed_at = now()
+    finalized = db.execute(
+        update(RoundORM)
+        .where(
+            RoundORM.id == claim.round_id,
+            RoundORM.status == RoundStatus.judging.value,
+            RoundORM.guess_claim_id == claim.id,
+        )
+        .values(
+            status=RoundStatus.guessed.value,
+            guess_claim_id=None,
+            completed_at=completed_at,
+            updated_at=completed_at,
+        )
+    )
+    if finalized.rowcount != 1:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="Guess scoring claim is no longer active")
+
+    score = int(judge["score"])
 
     guess = GuessORM(
         id=new_id(),
-        round_id=round_record.id,
-        user_id=guesser_user_id,
-        guess_text=guess_text.strip(),
+        round_id=claim.round_id,
+        user_id=claim.guesser_user_id,
+        guess_text=claim.guess_text,
         score=score,
         judge_result_json=json.dumps(judge),
         component_scores_json=json.dumps(judge.get("component_scores", {})),
-        clue_count_used=authoritative_clue_count,
+        clue_count_used=claim.clue_count_used,
     )
-    round_record.status = RoundStatus.guessed.value
-    round_record.completed_at = completed_at
-    game = db.get(GameORM, round_record.game_id)
+    game = db.get(GameORM, claim.game_id)
     if game:
-        game.current_turn_user_id = guesser_user_id
+        game.current_turn_user_id = claim.guesser_user_id
         game.updated_at = now()
     db.add(guess)
     try:
@@ -862,27 +989,50 @@ def submit_guess(db: Session, round_id: str, guess_text: str, user_id: Optional[
     except IntegrityError as exc:
         db.rollback()
         raise HTTPException(status_code=409, detail="This round has already been guessed") from exc
-    add_event(db, round_record.game_id, "guess.submitted", {"round_id": round_record.id}, user_id=guesser_user_id)
-    add_event(db, round_record.game_id, "round.scored", {"round_id": round_record.id, "score": score})
-    add_event(db, round_record.game_id, "turn.changed", {"current_turn_user_id": guesser_user_id})
+    add_event(db, claim.game_id, "guess.submitted", {"round_id": claim.round_id}, user_id=claim.guesser_user_id)
+    add_event(db, claim.game_id, "round.scored", {"round_id": claim.round_id, "score": score})
+    add_event(db, claim.game_id, "turn.changed", {"current_turn_user_id": claim.guesser_user_id})
     dispatches = notify_user(
         db,
-        round_record.creator_user_id,
+        claim.creator_user_id,
         "Your prompt was guessed",
         f"Score: {score}. It is your opponent's turn now.",
-        {"game_id": round_record.game_id, "round_id": round_record.id, "type": "guess.submitted"},
+        {"game_id": claim.game_id, "round_id": claim.round_id, "type": "guess.submitted"},
     )
     dispatches.extend(notify_user(
         db,
-        guesser_user_id,
+        claim.guesser_user_id,
         "Your turn",
         "Create the next weird prompt.",
-        {"game_id": round_record.game_id, "type": "turn.changed"},
+        {"game_id": claim.game_id, "type": "turn.changed"},
     ))
     db.commit()
     deliver_notifications(db, dispatches)
     db.refresh(guess)
     return guess_to_schema(guess)
+
+
+def submit_guess(db: Session, round_id: str, guess_text: str, user_id: Optional[str] = None, clue_count_used: int = 1) -> GuessResult:
+    claim = claim_guess(db, round_id, guess_text, user_id)
+    try:
+        judge = score_guess_claim(claim)
+    except Exception as exc:
+        logger.warning(
+            "guess.judging_failed",
+            extra={"round_id": round_id, "exception_type": qualified_exception_type(exc)},
+        )
+        release_guess_claim(db, claim)
+        raise HTTPException(status_code=503, detail="Guess scoring failed. Please try again.") from exc
+    try:
+        return finalize_guess_claim(db, claim, judge)
+    except HTTPException:
+        db.rollback()
+        release_guess_claim(db, claim)
+        raise
+    except Exception:
+        db.rollback()
+        release_guess_claim(db, claim)
+        raise
 
 
 def list_events(

@@ -89,6 +89,9 @@ def _apply_sqlite_light_migrations(bind=engine) -> None:
         )
         statements.append("CREATE UNIQUE INDEX IF NOT EXISTS uq_guesses_round_id ON guesses (round_id)")
     if "rounds" in inspector.get_table_names():
+        existing = {column["name"] for column in inspector.get_columns("rounds")}
+        if "guess_claim_id" not in existing:
+            statements.append("ALTER TABLE rounds ADD COLUMN guess_claim_id VARCHAR(64)")
         statements.extend(
             [
                 "CREATE TABLE IF NOT EXISTS task3_active_round_archive ("
@@ -96,13 +99,16 @@ def _apply_sqlite_light_migrations(bind=engine) -> None:
                 "INSERT OR IGNORE INTO task3_active_round_archive (round_id, original_status) "
                 "SELECT id, status FROM (SELECT id, status, ROW_NUMBER() OVER ("
                 "PARTITION BY game_id ORDER BY created_at DESC, id DESC) task3_rank FROM rounds "
-                "WHERE status IN ('generating', 'ready_to_guess')) ranked WHERE task3_rank > 1",
+                "WHERE status IN ('generating', 'ready_to_guess', 'judging')) ranked WHERE task3_rank > 1",
                 "UPDATE rounds SET status = 'failed' WHERE id IN (SELECT round_id FROM task3_active_round_archive)",
             ]
         )
-        statements.append(
-            "CREATE UNIQUE INDEX IF NOT EXISTS uq_rounds_one_active_per_game ON rounds (game_id) "
-            "WHERE status IN ('generating', 'ready_to_guess')"
+        statements.extend(
+            [
+                "DROP INDEX IF EXISTS uq_rounds_one_active_per_game",
+                "CREATE UNIQUE INDEX uq_rounds_one_active_per_game ON rounds (game_id) "
+                "WHERE status IN ('generating', 'ready_to_guess', 'judging')",
+            ]
         )
     if "generation_admission_gate" in inspector.get_table_names():
         statements.append(
