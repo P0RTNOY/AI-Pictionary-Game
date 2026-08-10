@@ -21,6 +21,8 @@ Backend, from `backend/` with the virtual environment active:
 python -m pytest -q
 ```
 
+The test harness owns a dedicated temporary SQLite database and overrides any inherited `DATABASE_URL` before importing application database code. Fixture cleanup cannot target the local/staging/production application database. Individual migration tests still supply their own disposable URLs.
+
 Disposable SQLite migration round trip:
 
 ```bash
@@ -39,6 +41,8 @@ alembic current
 
 Mobile, from `mobile/`:
 
+Use Node 20.19.4+ or Node 22.13.0+; CI pins Node 20.19.4 and `expo-doctor` 1.20.1.
+
 ```bash
 npm ci
 npm run test:task3-security
@@ -46,7 +50,7 @@ npm run test:task4-lifecycle
 npm run test:task5-lifecycle
 node scripts/test-app-config.js
 npm run typecheck
-npx expo-doctor
+npm run doctor
 EXPO_NO_DOTENV=1 EXPO_PUBLIC_APP_ENV=development EXPO_PUBLIC_BUILD_PROFILE=development EXPO_PUBLIC_API_URL=http://127.0.0.1:8000 npx expo config --type public --json
 ```
 

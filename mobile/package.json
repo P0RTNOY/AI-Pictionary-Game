@@ -9,6 +9,7 @@
     "android": "expo run:android",
     "web": "expo start --web",
     "typecheck": "tsc --noEmit",
+    "doctor": "expo-doctor",
     "test:task5-lifecycle": "node scripts/test-task5-lifecycle.js",
     "test:task4-lifecycle": "node scripts/test-task4-lifecycle.js",
     "test:task3-security": "node scripts/test-task3-security.js"
@@ -36,6 +37,7 @@
   },
   "devDependencies": {
     "@types/react": "~19.1.10",
+    "expo-doctor": "1.20.1",
     "typescript": "~5.9.2"
   }
 }

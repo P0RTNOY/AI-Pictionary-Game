@@ -133,6 +133,8 @@ source .venv/bin/activate
 python -m pytest -q
 ```
 
+The pytest harness always creates a dedicated `ai-pictionary-pytest-only-*` temporary directory and binds `app.db` to its SQLite file before importing application modules. It removes any inherited `DATABASE_URL` from the test process afterward so Alembic tests can supply their own disposable URLs. Plain `python -m pytest -q` therefore never performs fixture cleanup against the configured application database.
+
 For the disposable migration round trip used by CI, set `DATABASE_URL` to a new SQLite file, then run:
 
 ```bash
@@ -145,6 +147,8 @@ alembic current
 ```
 
 ## Mobile: first local run
+
+Use Node 20.19.4 or newer within Node 20, or Node 22.13.0 or newer. The pinned `expo-doctor` 1.20.1 enforces that runtime range.
 
 ```bash
 cd mobile
@@ -179,7 +183,7 @@ npm run test:task4-lifecycle
 npm run test:task5-lifecycle
 node scripts/test-app-config.js
 npm run typecheck
-npx expo-doctor
+npm run doctor
 EXPO_NO_DOTENV=1 EXPO_PUBLIC_APP_ENV=development EXPO_PUBLIC_BUILD_PROFILE=development EXPO_PUBLIC_API_URL=http://127.0.0.1:8000 npx expo config --type public --json
 ```
 

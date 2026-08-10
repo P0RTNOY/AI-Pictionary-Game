@@ -13,16 +13,17 @@ This document separates measured local evidence from checks that still need cred
 
 Current working-tree checks executed on 2026-08-10:
 
-- `backend/.venv/bin/python -m pytest -q` — **105 passed in 30.76s**.
+- Full backend suite launched with an inherited production-shaped environment and an unreachable PostgreSQL `DATABASE_URL` — **107 passed in 26.56s**. The harness overrode it before importing `app.db`; no external connection occurred.
+- Focused test-database safety regression — **2 passed**. It verifies an exported sentinel SQLite application database remains byte-for-byte unchanged and a non-SQLite URL is never used.
 - CI-shaped backend run with dotenv disabled and mock providers — **105 passed in 28.54s**. An earlier draft incorrectly set a global CI `DATABASE_URL`, which interfered with a test's disposable Alembic URL; the workflow now scopes that variable only to its migration step.
-- A staged-tree snapshot materialized outside the repository (the same implementation source as the final documentation commit): backend **105 passed in 11.56s**; all three mobile security/lifecycle scripts, app-config guard, typecheck, Expo Doctor **18/18**, and public Expo config passed.
+- A staged-tree snapshot materialized outside the repository (the same implementation source as the final follow-up commit): backend **107 passed in 82.27s** under the hostile inherited database environment; all three mobile security/lifecycle scripts, app-config guard, typecheck, pinned Expo Doctor **18/18**, and public Expo config passed.
 - Fresh disposable SQLite: `alembic heads`, `upgrade head`, `current`, `downgrade -1`, `upgrade head`, `current` — passed; final revision was `20260810_0005 (head)`.
 - `npm run test:task3-security` — passed.
 - `npm run test:task4-lifecycle` — passed.
 - `npm run test:task5-lifecycle` — passed.
 - `node scripts/test-app-config.js` — passed the missing/malformed/non-HTTP(S)/loopback release URL guard.
 - `npm run typecheck` — passed.
-- `npx expo-doctor` — **18/18 checks passed**.
+- `npm run doctor` (pinned `expo-doctor` 1.20.1) — **18/18 checks passed**.
 - Development `npx expo config --type public --json` with dotenv disabled and an explicit loopback development URL — passed; output was written outside the repository.
 - `.github/workflows/ci.yml` parsed as YAML and contains separate backend/mobile jobs. A hosted GitHub Actions run is not yet evidence and must be recorded after push.
 
@@ -80,7 +81,7 @@ No simulator gameplay pass is recorded. During the bounded Task 6 attempt, two u
 ## Release blockers
 
 - Final Task 8 whole-branch review, immutable candidate SHA, clean status/diff/secret/generated-file inspection, hosted CI result, remote branch verification, and PR field are not yet recorded.
-- `npm ci`/`npm audit --omit=dev` currently reports **27 advisories: 12 moderate and 15 high** in the Expo/React Native/Metro dependency graph. Suggested automatic resolutions include incompatible major SDK changes. A focused dependency/security triage is required before external distribution; do not run `npm audit fix --force` on the candidate.
+- `npm ci`/`npm audit --omit=dev` currently reports **27 vulnerable package entries: 12 moderate and 15 high** in the Expo/React Native/Metro dependency graph. Individual entries can aggregate multiple advisories. Suggested automatic resolutions include incompatible major SDK changes. A focused dependency/security triage is required before external distribution; do not run `npm audit fix --force` on the candidate.
 - External beta distribution should wait for at least one complete physical iOS two-player pass. Android must either pass or be explicitly removed from scope.
 - If the candidate advertises real AI or push, the corresponding live OpenRouter and Expo push checks above are blockers until recorded.
 - A PostgreSQL-backed staging deployment is blocked until the migration chain and core lifecycle are executed against that target database.
