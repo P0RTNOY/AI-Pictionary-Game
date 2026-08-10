@@ -51,7 +51,8 @@ npm run test:task5-lifecycle
 node scripts/test-app-config.js
 npm run typecheck
 npm run doctor
-EXPO_NO_DOTENV=1 EXPO_PUBLIC_APP_ENV=development EXPO_PUBLIC_BUILD_PROFILE=development EXPO_PUBLIC_API_URL=http://127.0.0.1:8000 npx expo config --type public --json
+EXPO_NO_DOTENV=1 EXPO_PUBLIC_APP_ENV=staging EXPO_PUBLIC_BUILD_PROFILE=preview EXPO_PUBLIC_API_URL=https://api.example.invalid npx expo config --type public --json
+EXPO_NO_DOTENV=1 EXPO_PUBLIC_APP_ENV=staging EXPO_PUBLIC_BUILD_PROFILE=preview EXPO_PUBLIC_API_URL=https://api.example.invalid npx expo export --platform web --output-dir /tmp/ai-pictionary-web
 ```
 
 The repository CI workflow performs the same core checks with mock providers and no external credentials. A green CI run does not substitute for the physical-device, live-provider, push, or target-PostgreSQL checks below.
@@ -89,7 +90,7 @@ EXPO_PUBLIC_BUILD_PROFILE=preview
 EXPO_PUBLIC_API_URL=https://api-staging.your-domain.example
 ```
 
-`EXPO_PUBLIC_API_URL` is public configuration, not a secret. Configure it as a plaintext EAS value in the matching `preview` or `production` environment before building. Release config intentionally fails for missing, malformed, non-HTTP(S), loopback, or unspecified URLs.
+`EXPO_PUBLIC_API_URL` is public configuration, not a secret. Configure it as a plaintext EAS value in the matching `preview` or `production` environment before building. Release config intentionally fails for missing, malformed, non-HTTP(S), loopback, or unspecified URLs. The native runtime repeats this guard whenever `__DEV__` is false, even if environment labels were omitted at build time.
 
 ## EAS build setup
 
@@ -137,7 +138,7 @@ Run with two fresh sessions after a safe local/test reset or against isolated st
 - Create a prompt; confirm only the creator can read it before the result.
 - Confirm all three artifact rows persist the actual `provider_used`.
 - In mock mode, waiting/guess/result screens show **Mock output — testing only**.
-- Reveal clues, verify warning/penalty, submit one guess, and inspect score components.
+- Reveal clues and verify each reveal is persisted before display. Reopen/background the round and confirm the count is retained, then submit one guess and verify the server-stored count determines the penalty and score components.
 - Confirm turn change, create a second round on device B, and complete it.
 - Confirm game statistics, Home grouping, activity, and badges update on both devices.
 - Switch rapidly between two games; stale fetch/poll completions must not overwrite the selected game.

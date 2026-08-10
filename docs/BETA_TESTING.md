@@ -106,7 +106,7 @@ For a deterministic reset, use an already-authenticated app while the backend is
 8. Submit a distinctive manual prompt from the creator.
 9. Confirm the creator continues to see that prompt while the guesser never sees the original prompt before scoring.
 10. In mock mode, confirm every artifact view shows the prominent **Mock output — testing only** warning and the persisted round provider is `mock`.
-11. Submit a guess, inspect score/components, and confirm the turn switches.
+11. Reveal another clue, leave and reopen the round, and confirm the same number remains visible. Submit a guess, inspect the persisted clue count/penalty and score components, and confirm the turn switches. The backend owns the count; changing a client guess payload cannot reduce the penalty.
 12. Create and complete a second round from the other player.
 
 Do not use prompt bodies or backend logs as tracing evidence. Prompt telemetry is intentionally redacted. Use round IDs, game IDs, event IDs, the **AI provider** row, and persisted artifact provenance instead.
@@ -193,7 +193,7 @@ Gameplay must continue if notification permission is denied or delivery fails. T
 - Provider failure gives a recoverable retry; duplicate retries are disabled while pending.
 - Mock artifacts are visibly labeled on waiting, guess, and result screens.
 - The guesser cannot read the original prompt before result.
-- Extra clue confirmation and penalty work.
+- Extra clue confirmation persists before display, survives reopen/resume, and produces the server-authoritative penalty.
 - Guess submission is single-action and turn/result/statistics update correctly.
 - Switching games, going Home, backgrounding, and resuming do not apply stale request results.
 - WebSocket reconnect and authenticated polling fallback do not duplicate events.

@@ -61,9 +61,9 @@ jobs:
     env:
       CI: "1"
       EXPO_NO_DOTENV: "1"
-      EXPO_PUBLIC_APP_ENV: development
-      EXPO_PUBLIC_BUILD_PROFILE: development
-      EXPO_PUBLIC_API_URL: http://127.0.0.1:8000
+      EXPO_PUBLIC_APP_ENV: staging
+      EXPO_PUBLIC_BUILD_PROFILE: preview
+      EXPO_PUBLIC_API_URL: https://api.example.invalid
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -84,4 +84,6 @@ jobs:
       - name: Run Expo Doctor
         run: npm run doctor
       - name: Validate public Expo config
-        run: npx expo config --type public --json > "${RUNNER_TEMP}/expo-public-config.json"
+        run: |
+          npx expo config --type public --json > "${RUNNER_TEMP}/expo-public-config.json"
+          npx expo export --platform web --output-dir "${RUNNER_TEMP}/expo-web"

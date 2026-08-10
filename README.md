@@ -22,7 +22,7 @@ alembic upgrade head
 uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
-The example configuration uses local SQLite, deterministic mock AI, and mock notifications. `AUTO_CREATE_TABLES=true` also keeps the local SQLite schema compatible at startup, but deployable environments must set it to `false` and run Alembic explicitly.
+The example configuration uses explicit `ENV=local`, local SQLite, deterministic mock AI, and mock notifications. `AUTO_CREATE_TABLES=true` also keeps the local SQLite schema compatible at startup. Missing or unknown `ENV` is production-shaped: debug, wildcard CORS, automatic table creation, and SQLite light migrations are disabled. Deployable environments must run Alembic explicitly.
 
 Public checks:
 
@@ -169,7 +169,7 @@ Browser preview:
 EXPO_PUBLIC_API_URL=http://localhost:8000 npm run web
 ```
 
-The local loopback default is intentionally limited to non-release environments. Staging and production Expo config fails closed if `EXPO_PUBLIC_API_URL` is missing, malformed, non-HTTP(S), loopback, or unspecified. Configure it as a plaintext public EAS environment variable for the matching `preview` or `production` environment; it is not a secret.
+The local loopback default is intentionally limited to development execution. Preview/production build profiles and staging/production app environments fail closed if `EXPO_PUBLIC_API_URL` is missing, malformed, non-HTTP(S), loopback, or unspecified. Native runtime validation also rejects a loopback or missing URL whenever `__DEV__` is false, including a release built without environment labels. Configure the URL as a plaintext public EAS environment variable; it is not a secret.
 
 `EXPO_PUBLIC_API_TIMEOUT_MS` optionally sets the API deadline from 1,000 to 60,000 ms; invalid values use the 15,000 ms default.
 
@@ -184,7 +184,8 @@ npm run test:task5-lifecycle
 node scripts/test-app-config.js
 npm run typecheck
 npm run doctor
-EXPO_NO_DOTENV=1 EXPO_PUBLIC_APP_ENV=development EXPO_PUBLIC_BUILD_PROFILE=development EXPO_PUBLIC_API_URL=http://127.0.0.1:8000 npx expo config --type public --json
+EXPO_NO_DOTENV=1 EXPO_PUBLIC_APP_ENV=staging EXPO_PUBLIC_BUILD_PROFILE=preview EXPO_PUBLIC_API_URL=https://api.example.invalid npx expo config --type public --json
+EXPO_NO_DOTENV=1 EXPO_PUBLIC_APP_ENV=staging EXPO_PUBLIC_BUILD_PROFILE=preview EXPO_PUBLIC_API_URL=https://api.example.invalid npx expo export --platform web --output-dir /tmp/ai-pictionary-web
 ```
 
 CI runs the same security/lifecycle, type, Doctor, config, backend test, and migration checks without provider or push credentials. See [the CI workflow](.github/workflows/ci.yml).
@@ -198,7 +199,7 @@ Public endpoints:
 - `POST /users`
 - `POST /invites/preview` (capability lookup, rate-limited)
 
-Private HTTP endpoints require `Authorization: Bearer <session token>`. The server derives the actor from that token and enforces profile ownership, game participation, and turn/role checks. Main private routes include profile/game reads, invite creation/join, round creation/read/retry/guess, event polling, WebSocket-ticket issuance, and device-token register/unregister.
+Private HTTP endpoints require `Authorization: Bearer <session token>`. The server derives the actor from that token and enforces profile ownership, game participation, and turn/role checks. Main private routes include profile/game reads, invite creation/join, round creation/read/retry, `POST /rounds/{round_id}/reveal-clue`, guess submission, event polling, WebSocket-ticket issuance, and device-token register/unregister. Clue reveals are persisted atomically for the authenticated guesser; scoring uses that server count and ignores the legacy client `clue_count_used` compatibility field.
 
 Realtime uses a short-lived, game-scoped, single-use ticket:
 

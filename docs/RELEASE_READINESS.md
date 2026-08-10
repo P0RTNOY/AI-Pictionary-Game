@@ -2,7 +2,7 @@
 
 - Evidence date: 2026-08-10
 - Candidate branch: `codex/beta-release-readiness`
-- Implementation SHA inspected before documentation/CI commit: `32186b83c4192cc790387befa4f21a50d6097ef1`
+- Implementation SHA inspected before the final Task 8 evidence update: `284cd15`
 - Final candidate SHA: `<update after Task 8 final validation>`
 - Verified remote branch: `<update after push>`
 - Pull request: `<update with URL, or record unavailable>`
@@ -12,6 +12,19 @@ This document separates measured local evidence from checks that still need cred
 ## Passed automatically
 
 Current working-tree checks executed on 2026-08-10:
+
+- Task 8 focused backend release regressions — **9 passed in 2.35s**. Coverage includes missing/unknown environment fail-closed behavior (including removal of wildcard CORS), no startup schema mutation with `AUTO_CREATE_TABLES=false`, SQLite foreign keys and `foreign_key_check`, stale generation after reset, immutable migration configuration, authenticated clue authorization, concurrent clue bounds, tampered client clue counts, and submit/reveal linearizability.
+- Full backend suite after the Task 8 fixes — **116 passed in 10.84s**.
+- Production-shaped migrated Uvicorn startup smoke — `/health` passed and unauthenticated `/debug/health/full` returned **404**; startup used `ENV=production`, `DEBUG=false`, and `AUTO_CREATE_TABLES=false`.
+- Two disposable SQLite migration paths passed at head `20260810_0005`: clean `upgrade head` / `downgrade 20260810_0004` / `upgrade head`, and previous-revision `upgrade 20260810_0003` / `upgrade 20260810_0004` / `downgrade 20260810_0003` / `upgrade head`.
+- `npm ci` completed from the committed lockfile. A package-manager-only safe transitive refresh updated `brace-expansion`, `fast-uri`, `js-yaml`, and `shell-quote`; it made no `package.json`, override, major-SDK, or `lightningcss` change.
+- Post-refresh `npm audit --omit=dev --json` reports **23 vulnerable package entries: 12 moderate and 11 high**, down from 27. The remaining advisory roots are `image-size`, `postcss`, and `uuid`; details and disposition are under Known non-blocking issues.
+- `npx expo install --check` — dependencies are up to date.
+- Task 3, Task 4, and Task 5 mobile checks, the expanded release URL/clue lifecycle checks, and `npm run typecheck` passed with an explicit safe dummy staging HTTPS API URL.
+- Pinned Expo Doctor — **18/18 checks passed**.
+- Public Expo config, production web export, and a live exported HTML-shell check passed with dotenv disabled and `EXPO_PUBLIC_API_URL=https://api.example.invalid`.
+
+Earlier Task 7 evidence:
 
 - Full backend suite launched with an inherited production-shaped environment and an unreachable PostgreSQL `DATABASE_URL` — **107 passed in 26.56s**. The harness overrode it before importing `app.db`; no external connection occurred.
 - Focused test-database safety regression — **2 passed**. It verifies an exported sentinel SQLite application database remains byte-for-byte unchanged and a non-SQLite URL is never used.
@@ -72,6 +85,8 @@ No simulator gameplay pass is recorded. During the bounded Task 6 attempt, two u
 
 ## Known non-blocking issues
 
+- The post-refresh npm audit still exits nonzero with **23 entries (12 moderate, 11 high)** rooted in `image-size`, `postcss`, and `uuid`. In this SDK 54 graph they are reached through Metro/Expo configuration or Xcode project tooling, not the shipped application runtime or user-controlled backend request path. npm offers only breaking Expo/React Native changes for these roots. They are therefore upstream-blocked build-tool risk for this candidate, not silently ignored; reassess on the next Expo-supported SDK update and do not use untrusted image/CSS/project inputs in build automation.
+
 - The local simulator tooling attempt did not finish a current JavaScript bundle. Automated lifecycle checks and web export pass, but this is not simulator UI evidence.
 - Local SQLite and the in-process invite limiter are appropriate only for the current single-service development/beta shape. Multi-instance deployment needs PostgreSQL and a shared rate limiter.
 - The repository previously reported missing local Git objects during an exact-index archive. On 2026-08-10, the previously named objects were readable and `git fsck --connectivity-only --no-dangling` exited cleanly. Final publication should still verify the pushed remote branch rather than assuming the earlier local issue is permanently resolved.
@@ -81,7 +96,6 @@ No simulator gameplay pass is recorded. During the bounded Task 6 attempt, two u
 ## Release blockers
 
 - Final Task 8 whole-branch review, immutable candidate SHA, clean status/diff/secret/generated-file inspection, hosted CI result, remote branch verification, and PR field are not yet recorded.
-- `npm ci`/`npm audit --omit=dev` currently reports **27 vulnerable package entries: 12 moderate and 15 high** in the Expo/React Native/Metro dependency graph. Individual entries can aggregate multiple advisories. Suggested automatic resolutions include incompatible major SDK changes. A focused dependency/security triage is required before external distribution; do not run `npm audit fix --force` on the candidate.
 - External beta distribution should wait for at least one complete physical iOS two-player pass. Android must either pass or be explicitly removed from scope.
 - If the candidate advertises real AI or push, the corresponding live OpenRouter and Expo push checks above are blockers until recorded.
 - A PostgreSQL-backed staging deployment is blocked until the migration chain and core lifecycle are executed against that target database.
