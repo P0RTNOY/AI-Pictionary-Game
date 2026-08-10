@@ -100,7 +100,7 @@ alembic upgrade head
 alembic current
 ```
 
-The current chain includes provider provenance, anonymous sessions and WebSocket tickets, transition constraints, device-token ownership, and device-token registration generations. Run `alembic downgrade -1` only against a disposable QA database; it is not a normal deployment step.
+The current chain includes provider provenance, anonymous sessions and WebSocket tickets, transition constraints, device-token ownership/generations, and owned guess-judging claims. Run `alembic downgrade -1` only against a disposable QA database; it is not a normal deployment step.
 
 PostgreSQL-shaped local setup:
 
@@ -199,7 +199,7 @@ Public endpoints:
 - `POST /users`
 - `POST /invites/preview` (capability lookup, rate-limited)
 
-Private HTTP endpoints require `Authorization: Bearer <session token>`. The server derives the actor from that token and enforces profile ownership, game participation, and turn/role checks. Main private routes include profile/game reads, invite creation/join, round creation/read/retry, `POST /rounds/{round_id}/reveal-clue`, guess submission, event polling, WebSocket-ticket issuance, and device-token register/unregister. Clue reveals are persisted atomically for the authenticated guesser; scoring uses that server count and ignores the legacy client `clue_count_used` compatibility field.
+Private HTTP endpoints require `Authorization: Bearer <session token>`. The server derives the actor from that token and enforces profile ownership, game participation, and turn/role checks. Main private routes include profile/game reads, invite creation/join, round creation/read/retry, `POST /rounds/{round_id}/reveal-clue`, guess submission, event polling, WebSocket-ticket issuance, and device-token register/unregister. Clue reveals are persisted atomically for the authenticated guesser; scoring uses that server count and ignores the legacy client `clue_count_used` compatibility field. Guess submission atomically claims a round as `judging`, commits before calling an external judge, then finalizes only the matching claim. Duplicate submissions are rejected, failed judging restores a retryable `ready` round, and stale claims are recovered safely.
 
 Realtime uses a short-lived, game-scoped, single-use ticket:
 
@@ -208,13 +208,15 @@ POST /games/{game_id}/websocket-ticket
 WS /ws/games/{game_id}?ticket=...&after_id=...
 ```
 
-The mobile app deduplicates event IDs, bounds reconnect backoff, and uses authenticated polling as fallback. It never puts the long-lived bearer token in the WebSocket URL.
+The mobile app deduplicates event IDs with bounded memory, preserves the current game/user cursor while realtime is temporarily disabled in the background, bounds reconnect backoff, and uses authenticated polling as fallback. It resets the cursor when the game or user identity changes and never puts the long-lived bearer token in the WebSocket URL.
 
 Legacy direct `POST /games`, `POST /rounds`, and capability-in-path invite routes exist only in authenticated local debug mode. Debug health/data/reset/notification routes also require authenticated local debug mode and are unavailable in deployable environments.
 
 ## Push notifications
 
-Local development defaults to:
+`NOTIFICATION_PROVIDER` accepts exactly `mock` or `expo`. Local/dev/test defaults to `mock`; staging, production, missing, and unknown environments default to `expo`. Set it explicitly in deployments. A typo fails startup instead of silently disabling delivery, and `GET /health` reports the selected provider.
+
+Local development:
 
 ```bash
 NOTIFICATION_PROVIDER=mock
@@ -256,7 +258,14 @@ NOTIFICATION_PROVIDER=expo
 EXPO_ACCESS_TOKEN=...
 ```
 
-Run `alembic upgrade head` before starting the deployed backend. SQLite is appropriate for local/single-process testing; PostgreSQL remains the intended deployable database target.
+Run `alembic upgrade head` before starting the deployed backend. The backend image contains `alembic.ini` and the complete migration tree, so the same immutable image can be used for the one-shot migration and the application:
+
+```bash
+docker run --rm --env-file /path/to/backend.env YOUR_BACKEND_IMAGE alembic upgrade head
+docker run --env-file /path/to/backend.env -p 8000:8000 YOUR_BACKEND_IMAGE
+```
+
+Do not rely on Uvicorn startup to migrate a deployable database; keep `AUTO_CREATE_TABLES=false`. SQLite is appropriate for local/single-process testing; PostgreSQL remains the intended deployable database target.
 
 ## QA and release evidence
 

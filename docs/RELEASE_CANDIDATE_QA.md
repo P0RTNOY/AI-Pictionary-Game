@@ -39,6 +39,15 @@ alembic upgrade head
 alembic current
 ```
 
+The production backend image contains both `alembic.ini` and `alembic/`. Validate the same immutable image with a disposable database before deployment:
+
+```bash
+docker build -t ai-pictionary-backend-rc .
+docker run --rm --env-file /path/to/backend.env ai-pictionary-backend-rc alembic upgrade head
+```
+
+Start the application image only after that command succeeds. Do not depend on application startup to mutate a deployable schema.
+
 Mobile, from `mobile/`:
 
 Use Node 20.19.4+ or Node 22.13.0+; CI pins Node 20.19.4 and `expo-doctor` 1.20.1.
@@ -80,7 +89,7 @@ alembic upgrade head
 alembic current
 ```
 
-Verify `GET /health` and `GET /ai/status` after deployment. Confirm all debug data/reset/test-notification routes return `404` in staging/production, including when someone accidentally sets `DEBUG=true`.
+Verify `GET /health` reports `notification_provider=expo` and verify `GET /ai/status` after deployment. `NOTIFICATION_PROVIDER` accepts only `mock` or `expo`; staging/production defaults to `expo`, but it should remain explicit in deployment configuration. Confirm all debug data/reset/test-notification routes return `404` in staging/production, including when someone accidentally sets `DEBUG=true`.
 
 Mobile public configuration:
 
@@ -138,12 +147,12 @@ Run with two fresh sessions after a safe local/test reset or against isolated st
 - Create a prompt; confirm only the creator can read it before the result.
 - Confirm all three artifact rows persist the actual `provider_used`.
 - In mock mode, waiting/guess/result screens show **Mock output — testing only**.
-- Reveal clues and verify each reveal is persisted before display. Reopen/background the round and confirm the count is retained, then submit one guess and verify the server-stored count determines the penalty and score components.
+- Reveal clues and verify each reveal is persisted before display. Reopen/background the round and confirm the count is retained, then submit one guess. Confirm the app shows **Scoring guess** while judging, the server-stored count determines the penalty and score components, duplicate submission is rejected, and a controlled judge failure returns the round to a retryable state.
 - Confirm turn change, create a second round on device B, and complete it.
 - Confirm game statistics, Home grouping, activity, and badges update on both devices.
 - Switch rapidly between two games; stale fetch/poll completions must not overwrite the selected game.
 - Background/foreground during round load and mutation; duplicate actions and stale callbacks must not apply.
-- Disconnect/reconnect network; WebSocket recovery and polling fallback must remain bounded and avoid duplicate events.
+- Disconnect/reconnect network and background/foreground the app; WebSocket recovery and polling fallback must remain bounded, preserve the current game/user event cursor, and avoid duplicate events.
 - Restart app and backend; valid session and migrated game state persist.
 
 ## Provider QA

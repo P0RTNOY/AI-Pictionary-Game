@@ -106,7 +106,7 @@ For a deterministic reset, use an already-authenticated app while the backend is
 8. Submit a distinctive manual prompt from the creator.
 9. Confirm the creator continues to see that prompt while the guesser never sees the original prompt before scoring.
 10. In mock mode, confirm every artifact view shows the prominent **Mock output — testing only** warning and the persisted round provider is `mock`.
-11. Reveal another clue, leave and reopen the round, and confirm the same number remains visible. Submit a guess, inspect the persisted clue count/penalty and score components, and confirm the turn switches. The backend owns the count; changing a client guess payload cannot reduce the penalty.
+11. Reveal another clue, leave and reopen the round, and confirm the same number remains visible. Submit a guess, confirm **Scoring guess** appears during judging, inspect the persisted clue count/penalty and score components, and confirm the turn switches. The backend owns the count; changing a client guess payload cannot reduce the penalty. A controlled judge failure should restore the round so the guess can be retried.
 12. Create and complete a second round from the other player.
 
 Do not use prompt bodies or backend logs as tracing evidence. Prompt telemetry is intentionally redacted. Use round IDs, game IDs, event IDs, the **AI provider** row, and persisted artifact provenance instead.
@@ -158,6 +158,8 @@ Confirm **AI provider** says `local`, create a new round, and verify `provider_u
 
 ## Push testing
 
+`NOTIFICATION_PROVIDER` accepts exactly `mock` or `expo`. Local/dev/test defaults to `mock`; staging/production defaults to `expo` and reports the selection from `GET /health`. Keep the value explicit for beta deployments.
+
 Local mock notification mode:
 
 ```bash
@@ -194,9 +196,9 @@ Gameplay must continue if notification permission is denied or delivery fails. T
 - Mock artifacts are visibly labeled on waiting, guess, and result screens.
 - The guesser cannot read the original prompt before result.
 - Extra clue confirmation persists before display, survives reopen/resume, and produces the server-authoritative penalty.
-- Guess submission is single-action and turn/result/statistics update correctly.
+- Guess submission is single-action, shows a scoring state while the judge runs, remains retryable after judge failure, and updates turn/result/statistics exactly once.
 - Switching games, going Home, backgrounding, and resuming do not apply stale request results.
-- WebSocket reconnect and authenticated polling fallback do not duplicate events.
+- Background/foreground, WebSocket reconnect, and authenticated polling fallback preserve the current game/user cursor without duplicating events.
 - App/backend restart preserves valid sessions and migrated game state.
 - Buttons expose useful accessibility labels, selected state, and disabled/loading state.
 - Local app reset unregisters push best-effort and clears only this installation.

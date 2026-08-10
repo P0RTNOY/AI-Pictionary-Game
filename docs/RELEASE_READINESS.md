@@ -2,7 +2,7 @@
 
 - Evidence date: 2026-08-10
 - Candidate branch: `codex/beta-release-readiness`
-- Implementation SHA inspected before the final Task 8 evidence update: `f69dceb`
+- Implementation SHA inspected before the final Task 8 evidence update: `ba4ac44`
 - Final candidate SHA: `<update after Task 8 final validation>`
 - Verified remote branch: `<update after push>`
 - Pull request: `<update with URL, or record unavailable>`
@@ -13,14 +13,15 @@ This document separates measured local evidence from checks that still need cred
 
 Current working-tree checks executed on 2026-08-10:
 
-- Task 8 focused backend release regressions — **9 passed in 2.35s**. Coverage includes missing/unknown environment fail-closed behavior (including removal of wildcard CORS), no startup schema mutation with `AUTO_CREATE_TABLES=false`, SQLite foreign keys and `foreign_key_check`, stale generation after reset, immutable migration configuration, authenticated clue authorization, concurrent clue bounds, tampered client clue counts, and submit/reveal linearizability.
-- Full backend suite after the Task 8 fixes — **116 passed in 10.84s**.
-- Production-shaped migrated Uvicorn startup smoke — `/health` passed and unauthenticated `/debug/health/full` returned **404**; startup used `ENV=production`, `DEBUG=false`, and `AUTO_CREATE_TABLES=false`.
-- Two disposable SQLite migration paths passed at head `20260810_0005`: clean `upgrade head` / `downgrade 20260810_0004` / `upgrade head`, and previous-revision `upgrade 20260810_0003` / `upgrade 20260810_0004` / `downgrade 20260810_0003` / `upgrade head`.
+- Final guess-judging plus Task 8 backend regressions — **24 passed in 12.56s**. Coverage includes non-blocking external scoring, immediate duplicate rejection, unrelated SQLite write progress while the judge is stalled, same-process HTTP/WebSocket responsiveness, owned finalization, stable recoverable judge/finalization errors, stale-claim recovery, exact notification-provider selection, Docker migration-context inclusion, authoritative clue counts, and submit/reveal linearizability.
+- Full backend suite after the final release-review fixes — **131 passed in 49.01s**.
+- Production-shaped migrated Uvicorn startup smoke — `/health` returned `status=ok` with `notification_provider=expo`, and unauthenticated `/debug/health/full` returned **404**; startup used `ENV=production`, `DEBUG=false`, `AUTO_CREATE_TABLES=false`, and no explicit notification-provider override.
+- Two disposable SQLite migration paths passed at head `20260810_0006`: clean `upgrade head` / `downgrade 20260810_0005` / `upgrade head`, and previous-revision `upgrade 20260810_0005` / `upgrade head` / `downgrade 20260810_0005` / `upgrade head`. Downgrade restores any in-flight `judging` round to `ready`, removes `guess_claim_id`, and reinstates the previous active-round index predicate.
+- Dockerfile source regression confirms the backend image includes `alembic.ini` and the full `alembic/` tree. An actual image build and one-shot in-container migration could not run because the local Docker daemon socket was unavailable; `docker version` failed to connect on the final retry.
 - `npm ci` completed from the committed lockfile. A package-manager-only safe transitive refresh updated `brace-expansion`, `fast-uri`, `js-yaml`, and `shell-quote`; it made no `package.json`, override, major-SDK, or `lightningcss` change.
 - Post-refresh `npm audit --omit=dev --json` reports **23 vulnerable package entries: 12 moderate and 11 high**, down from 27. The remaining advisory roots are `image-size`, `postcss`, and `uuid`; details and disposition are under Known non-blocking issues.
 - `npx expo install --check` — dependencies are up to date.
-- Task 3, Task 4, and Task 5 mobile checks, the expanded release URL/clue lifecycle checks, and `npm run typecheck` passed with an explicit safe dummy staging HTTPS API URL.
+- Task 3, Task 4, and Task 5 mobile checks, the expanded release URL/clue/judging/realtime-cursor lifecycle checks, and `npm run typecheck` passed with an explicit safe dummy staging HTTPS API URL. Realtime state is bounded, survives a background disable/enable for the same game/user identity, and resets on identity change.
 - Pinned Expo Doctor — **18/18 checks passed**.
 - Public Expo config, production web export, and a live exported HTML-shell check passed with dotenv disabled and `EXPO_PUBLIC_API_URL=https://api.example.invalid`.
 
@@ -52,6 +53,8 @@ Earlier exact-tree Task 6 evidence at commit `32186b8`:
 ```
 
 Automated coverage includes authorization/IDOR boundaries, invite/round/guess atomic invariants, generation budgets, provider constructor/timeout/malformed/oversized/error paths, retry provenance, reset restrictions, device-token ownership/generations, notification bounds, WebSocket ticket consumption/replay, two-round lifecycle/statistics, cross-game isolation, deep-link parsing, stale-work retirement, and source-level secret/prompt logging guards.
+
+Guess scoring now uses an explicit `judging` state and an opaque owned claim. The database claim commits before external judge I/O, the synchronous FastAPI route runs in the worker threadpool, and only the current claim may finalize or restore the round. The mobile UI represents this interval as **Scoring guess** rather than treating it as a generic wait.
 
 ## Passed locally / simulator
 
@@ -91,11 +94,13 @@ No simulator gameplay pass is recorded. During the bounded Task 6 attempt, two u
 - Local SQLite and the in-process invite limiter are appropriate only for the current single-service development/beta shape. Multi-instance deployment needs PostgreSQL and a shared rate limiter.
 - The repository previously reported missing local Git objects during an exact-index archive. On 2026-08-10, the previously named objects were readable and `git fsck --connectivity-only --no-dangling` exited cleanly. Final publication should still verify the pushed remote branch rather than assuming the earlier local issue is permanently resolved.
 - `npm ci` prints deprecation warnings in transitive Expo/Metro tooling. They do not fail install, typecheck, Doctor, config, or export.
+- Docker runtime evidence is incomplete on this machine because no Docker daemon was available. The image-context regression passes, but the release image must still be built and run with `alembic upgrade head` against a disposable database in CI or the deployment platform.
 - Production universal links/app links require domain association files and native configuration; only the custom development scheme and pure parser behavior are currently implemented/covered.
 
 ## Release blockers
 
-- Final Task 8 whole-branch review, immutable candidate SHA, clean status/diff/secret/generated-file inspection, hosted CI result, remote branch verification, and PR field are not yet recorded.
+- Immutable final candidate SHA, hosted CI result, remote branch verification, and PR field are not yet recorded.
+- The production backend image build plus in-container `alembic upgrade head` remains a release check until executed on a Docker-capable CI runner or deployment platform.
 - External beta distribution should wait for at least one complete physical iOS two-player pass. Android must either pass or be explicitly removed from scope.
 - If the candidate advertises real AI or push, the corresponding live OpenRouter and Expo push checks above are blockers until recorded.
 - A PostgreSQL-backed staging deployment is blocked until the migration chain and core lifecycle are executed against that target database.
