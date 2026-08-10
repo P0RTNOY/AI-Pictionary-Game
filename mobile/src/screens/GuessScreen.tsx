@@ -2,7 +2,8 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Alert, ScrollView, Text, TextInput, View } from "react-native";
 import { AlertTriangle, CheckCircle2, Eye } from "lucide-react-native";
 import { SvgXml } from "react-native-svg";
-import { submitGuess } from "../api/rounds";
+import { revealClue, submitGuess } from "../api/rounds";
+import { clampPersistedClueCount } from "../clueRevealState";
 import { PrimaryButton, SecondaryButton } from "../components/Buttons";
 import { colors, styles } from "../styles";
 import type { GuessResult, Round } from "../types/game";
@@ -24,21 +25,34 @@ export function GuessScreen({
   onResult: (result: GuessResult) => void;
 }) {
   const submitInFlight = useRef(false);
+  const revealInFlight = useRef(false);
   const confirmationOpen = useRef(false);
   const submitController = useRef<AbortController | null>(null);
+  const revealController = useRef<AbortController | null>(null);
   const [guess, setGuess] = useState("");
   const [loading, setLoading] = useState(false);
-  const [visibleCount, setVisibleCount] = useState(1);
+  const [revealLoading, setRevealLoading] = useState(false);
   const readySketches = useMemo(() => round.generated_svgs.filter((svg) => svg.status === "done" && svg.svg_text), [round]);
+  const [visibleCount, setVisibleCount] = useState(() => clampPersistedClueCount(round.clue_reveal_count, readySketches.length));
   const visibleSketches = readySketches.slice(0, visibleCount);
 
   useEffect(() => {
+    setVisibleCount(clampPersistedClueCount(round.clue_reveal_count, readySketches.length));
+  }, [round.id, round.clue_reveal_count, readySketches.length]);
+
+  useEffect(() => {
     submitController.current?.abort();
+    revealController.current?.abort();
     submitController.current = null;
     submitInFlight.current = false;
+    revealInFlight.current = false;
     confirmationOpen.current = false;
     setLoading(false);
-    return () => submitController.current?.abort();
+    setRevealLoading(false);
+    return () => {
+      submitController.current?.abort();
+      revealController.current?.abort();
+    };
   }, [lifecycleEpoch]);
 
   if (round.game_id && round.game_id !== gameId) {
@@ -74,7 +88,7 @@ export function GuessScreen({
     submitController.current = controller;
     setLoading(true);
     try {
-      const result = await submitGuess(round.id, guess.trim(), visibleCount, controller.signal);
+      const result = await submitGuess(round.id, guess.trim(), controller.signal);
       if (controller.signal.aborted) return;
       onResult(result);
     } catch (error) {
@@ -89,11 +103,35 @@ export function GuessScreen({
   }
 
   function revealNext() {
+    if (revealInFlight.current || loading) return;
     warningHaptic();
     Alert.alert("Reveal another clue?", "Each extra sketch reduces the final score by 8 points.", [
       { text: "Cancel", style: "cancel" },
-      { text: "Reveal", onPress: () => setVisibleCount((count) => count + 1) },
+      { text: "Reveal", onPress: () => { void persistReveal(); } },
     ]);
+  }
+
+  async function persistReveal() {
+    if (revealInFlight.current || loading) return;
+    revealInFlight.current = true;
+    const controller = new AbortController();
+    revealController.current = controller;
+    setRevealLoading(true);
+    try {
+      const updatedRound = await revealClue(round.id, controller.signal);
+      if (controller.signal.aborted) return;
+      setVisibleCount(clampPersistedClueCount(updatedRound.clue_reveal_count, readySketches.length));
+    } catch (error) {
+      if (!controller.signal.aborted) {
+        Alert.alert("Could not reveal clue", error instanceof Error ? error.message : "Unknown error");
+      }
+    } finally {
+      if (revealController.current === controller) {
+        if (!controller.signal.aborted) setRevealLoading(false);
+        revealInFlight.current = false;
+        revealController.current = null;
+      }
+    }
   }
 
   const isMock = isMockArtifact(round.generated_svgs);
@@ -131,7 +169,13 @@ export function GuessScreen({
         </View>
       )}
       {visibleCount < readySketches.length && (
-        <SecondaryButton label="Show next clue" icon={<Eye size={18} color={colors.ink} />} onPress={revealNext} />
+        <SecondaryButton
+          label="Show next clue"
+          icon={<Eye size={18} color={colors.ink} />}
+          onPress={revealNext}
+          disabled={loading}
+          loading={revealLoading}
+        />
       )}
       {readySketches.length > 1 && (
         <View style={styles.penaltyBox}>
@@ -148,7 +192,7 @@ export function GuessScreen({
         label="Submit guess"
         icon={<CheckCircle2 size={20} color={colors.paper} />}
         onPress={submit}
-        disabled={guess.trim().length < 2}
+        disabled={guess.trim().length < 2 || revealLoading}
         loading={loading}
       />
     </ScrollView>

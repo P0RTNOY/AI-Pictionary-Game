@@ -2,6 +2,7 @@ const { isIP } = require("node:net");
 
 const LOCAL_API_URL = "http://localhost:8000";
 const RELEASE_ENVIRONMENTS = new Set(["staging", "production"]);
+const RELEASE_BUILD_PROFILES = new Set(["preview", "production"]);
 
 function isIpv4LoopbackOrUnspecified(hostname) {
   if (isIP(hostname) !== 4) return false;
@@ -42,9 +43,10 @@ function isLoopbackUrl(value) {
 
 module.exports = ({ config }) => {
   const appEnv = process.env.EXPO_PUBLIC_APP_ENV ?? config.extra?.appEnv ?? "local";
+  const buildProfile = process.env.EXPO_PUBLIC_BUILD_PROFILE ?? process.env.EAS_BUILD_PROFILE ?? config.extra?.buildProfile ?? "local";
   const apiUrl = process.env.EXPO_PUBLIC_API_URL;
 
-  if (RELEASE_ENVIRONMENTS.has(appEnv) && (!apiUrl || isLoopbackUrl(apiUrl))) {
+  if ((RELEASE_ENVIRONMENTS.has(appEnv) || RELEASE_BUILD_PROFILES.has(buildProfile)) && (!apiUrl || isLoopbackUrl(apiUrl))) {
     throw new Error(
       "EXPO_PUBLIC_API_URL must be a non-loopback URL for staging and production builds. Configure it as a plaintext EAS environment variable."
     );
@@ -55,7 +57,7 @@ module.exports = ({ config }) => {
     extra: {
       ...config.extra,
       appEnv,
-      buildProfile: process.env.EXPO_PUBLIC_BUILD_PROFILE ?? config.extra?.buildProfile ?? "local",
+      buildProfile,
       apiUrl: apiUrl ?? LOCAL_API_URL,
     },
   };

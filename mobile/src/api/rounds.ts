@@ -21,10 +21,17 @@ export function retryGeneration(roundId: string, signal?: AbortSignal): Promise<
   });
 }
 
-export function submitGuess(roundId: string, guessText: string, clueCountUsed: number, signal?: AbortSignal): Promise<GuessResult> {
+export function revealClue(roundId: string, signal?: AbortSignal): Promise<Round> {
+  return apiFetch<Round>(`/rounds/${roundId}/reveal-clue`, {
+    method: "POST",
+    signal,
+  });
+}
+
+export function submitGuess(roundId: string, guessText: string, signal?: AbortSignal): Promise<GuessResult> {
   return apiFetch<GuessResult>(`/rounds/${roundId}/guess`, {
     method: "POST",
-    body: JSON.stringify({ guess_text: guessText, clue_count_used: clueCountUsed }),
+    body: JSON.stringify({ guess_text: guessText }),
     signal,
   });
 }

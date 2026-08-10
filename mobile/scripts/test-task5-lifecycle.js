@@ -232,6 +232,19 @@ async function run() {
   assert.equal(isMockArtifact([{ provider_used: "mock" }]), true);
   assert.equal(isMockArtifact([{ provider_used: null }]), false);
 
+  const { clampPersistedClueCount } = loadTypeScriptModule("src/clueRevealState.ts");
+  assert.equal(clampPersistedClueCount(1, 3), 1);
+  assert.equal(clampPersistedClueCount(2, 3), 2);
+  assert.equal(clampPersistedClueCount(99, 3), 3);
+  assert.equal(clampPersistedClueCount(0, 3), 1);
+
+  const { assertReleaseApiUrl } = loadTypeScriptModule("src/apiUrlSafety.ts");
+  assert.equal(assertReleaseApiUrl("http://localhost:8000", true), "http://localhost:8000");
+  assert.throws(() => assertReleaseApiUrl("http://localhost:8000", false), /non-loopback/);
+  assert.throws(() => assertReleaseApiUrl("http://127.0.0.1:8000", false), /non-loopback/);
+  assert.throws(() => assertReleaseApiUrl("", false), /non-loopback/);
+  assert.equal(assertReleaseApiUrl("https://api.example.test", false), "https://api.example.test");
+
   const app = read("App.tsx");
   const events = read("src/hooks/useGameEvents.ts");
   const gamesApi = read("src/api/games.ts");
@@ -266,6 +279,11 @@ async function run() {
   assert.match(client, /createAbortDeadline/);
   assert.match(gamesApi, /signal\?: AbortSignal/);
   assert.match(roundsApi, /signal\?: AbortSignal/);
+  assert.match(roundsApi, /revealClue/);
+  assert.doesNotMatch(roundsApi, /clue_count_used/);
+  assert.match(guess, /round\.clue_reveal_count/);
+  assert.match(guess, /revealClue/);
+  assert.match(guess, /revealInFlight/);
   for (const source of [waiting, guess, result]) {
     assert.match(source, /Mock output — testing only/);
     assert.doesNotMatch(source, /isDev && isMock/);
