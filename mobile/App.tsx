@@ -53,6 +53,7 @@ export default function App() {
   const [startupError, setStartupError] = useState<string | null>(null);
   const [startupLoading, setStartupLoading] = useState(false);
   const [sessionRetiring, setSessionRetiring] = useState(false);
+  const [sessionAccessToken, setSessionAccessToken] = useState<string | null>(null);
   const lastHandledUrl = useRef<string | null>(null);
   const sessionEpoch = useRef(createSessionEpoch()).current;
 
@@ -135,7 +136,7 @@ export default function App() {
     enabled: Boolean(selectedGame && user && !sessionRetiring),
     onEvents: handleGameEvents,
   });
-  const pushStatus = usePushNotifications(user?.id ?? null, openGameById, !sessionRetiring);
+  const pushStatus = usePushNotifications(user?.id ?? null, sessionAccessToken, openGameById, !sessionRetiring);
 
   const showHeader = screen !== "onboarding" && screen !== "profile_setup";
   const showBack = Boolean(user && screen !== "home");
@@ -175,6 +176,7 @@ export default function App() {
       const existing = await getUser(storedId!);
       if (!sessionEpoch.isCurrent(capturedEpoch)) return;
       sessionEpoch.activate();
+      setSessionAccessToken(storedToken);
       setUser(existing);
       setStartupError(null);
       setScreen(restoredSessionDestination(Boolean(pendingInviteCode)));
@@ -195,6 +197,7 @@ export default function App() {
 
   async function clearStoredSession() {
     configureApiCredential(null);
+    setSessionAccessToken(null);
     await Promise.all([
       AsyncStorage.removeItem(USER_ID_KEY),
       AsyncStorage.removeItem(SESSION_TOKEN_KEY),
@@ -322,13 +325,23 @@ export default function App() {
     setSessionRetiring(true);
     let resetError: unknown = null;
     try {
-      if (unregisterPush) await pushStatus.unregisterCurrentToken();
-      await clearStoredSession();
-      await AsyncStorage.removeItem(ONBOARDING_KEY);
-    } catch (error) {
-      resetError = error;
+      if (unregisterPush) {
+        try {
+          await pushStatus.unregisterCurrentToken();
+        } catch (error) {
+          captureError(error, { area: "push_unregistration_during_reset", userId: user?.id ?? null });
+        }
+      }
+      try {
+        await clearStoredSession();
+        await AsyncStorage.removeItem(ONBOARDING_KEY);
+      } catch (error) {
+        resetError = error;
+      }
     } finally {
+      // Local state is retired even when best-effort push or storage cleanup fails.
       configureApiCredential(null);
+      setSessionAccessToken(null);
       setUser(null);
       setSelectedGame(null);
       setSelectedRound(null);
@@ -446,6 +459,7 @@ export default function App() {
               ]);
               configureApiCredential(session.access_token);
               sessionEpoch.activate();
+              setSessionAccessToken(session.access_token);
               setUser(session.user);
               setScreen(pendingInviteCode ? "invites" : "home");
             }}

@@ -31,12 +31,18 @@ function telemetryUrl(path: string) {
   return path.startsWith("/invites/") ? `${API_URL}/invites/{code}` : `${API_URL}${path}`;
 }
 
-export async function apiFetch<T>(path: string, options: RequestInit = {}): Promise<T> {
+export async function apiFetch<T>(
+  path: string,
+  options: RequestInit = {},
+  accessTokenOverride?: string | null,
+): Promise<T> {
   const url = `${API_URL}${path}`;
   try {
     const headers = new Headers(options.headers);
     headers.set("Content-Type", "application/json");
-    if (apiAccessToken) headers.set("Authorization", `Bearer ${apiAccessToken}`);
+    const accessToken = accessTokenOverride === undefined ? apiAccessToken : accessTokenOverride;
+    if (accessToken) headers.set("Authorization", `Bearer ${accessToken}`);
+    else headers.delete("Authorization");
     const response = await fetch(url, {
       ...options,
       headers,

@@ -1,71 +1,101 @@
-type IdentityWorkCallbacks<Result> = {
-  run: (identity: string) => Promise<Result>;
-  cleanup: (identity: string, result: Result) => Promise<void>;
-  canCleanup: (identity: string) => boolean;
-  accept: (identity: string, result: Result) => void;
-  reject: (identity: string, error: unknown) => void;
+export type WorkSettlement<Value> =
+  | { status: "completed"; value: Value }
+  | { status: "timeout" };
+
+type IdentityWorkCallbacks<Session, Result> = {
+  sessionKey: (session: Session) => string;
+  run: (session: Session) => Promise<Result>;
+  cleanup: (session: Session, result: Result) => Promise<void>;
+  accept: (session: Session, result: Result) => void;
+  reject: (session: Session, error: unknown) => void;
+  settle: <Value>(promise: Promise<Value>, label: string) => Promise<WorkSettlement<Value>>;
 };
 
-export type IdentityWorkCoordinator<Result> = {
-  activate: (identity: string) => Promise<Result | null>;
-  retire: (identity: string) => Promise<void>;
+export type IdentityWorkCoordinator<Session, Result> = {
+  activate: (session: Session) => Promise<Result | null>;
+  retire: (session: Session) => Promise<void>;
 };
 
-export function createIdentityWorkCoordinator<Result>(
-  callbacks: IdentityWorkCallbacks<Result>,
-): IdentityWorkCoordinator<Result> {
+export function createIdentityWorkCoordinator<Session, Result>(
+  callbacks: IdentityWorkCallbacks<Session, Result>,
+): IdentityWorkCoordinator<Session, Result> {
   let generation = 0;
-  let currentIdentity: string | null = null;
-  const accepted = new Map<string, Result>();
-  const active = new Map<string, Promise<Result | null>>();
+  let currentKey: string | null = null;
+  const accepted = new Map<string, { session: Session; result: Result }>();
+  const active = new Map<string, { session: Session; work: Promise<Result | null> }>();
 
-  function activate(identity: string): Promise<Result | null> {
-    const existing = active.get(identity);
-    if (existing && currentIdentity === identity) return existing;
+  async function cleanup(session: Session, result: Result, key: string): Promise<void> {
+    try {
+      await callbacks.settle(callbacks.cleanup(session, result), `cleanup:${key}`);
+    } catch {
+      // Cleanup is best-effort and must never pin a newer session behind an older one.
+    }
+  }
 
-    currentIdentity = identity;
+  function activate(session: Session): Promise<Result | null> {
+    const key = callbacks.sessionKey(session);
+    const existing = active.get(key);
+    if (existing && currentKey === key) return existing.work;
+
+    currentKey = key;
     const workGeneration = ++generation;
     const blockers = [...active.entries()]
-      .filter(([activeIdentity]) => activeIdentity !== identity)
-      .map(([, work]) => work);
+      .filter(([activeKey]) => activeKey !== key)
+      .map(([, entry]) => entry.work);
     const work = (async () => {
-      await Promise.allSettled(blockers);
-      if (currentIdentity !== identity || generation !== workGeneration) return null;
       try {
-        const result = await callbacks.run(identity);
-        if (currentIdentity !== identity || generation !== workGeneration) {
-          if (callbacks.canCleanup(identity)) await callbacks.cleanup(identity, result);
-          else accepted.set(identity, result);
+        if (blockers.length > 0) {
+          // A timed-out predecessor is detached so the latest session may continue.
+          await callbacks.settle(Promise.allSettled(blockers), `blockers:${key}`);
+        }
+        if (currentKey !== key || generation !== workGeneration) return null;
+
+        const runSettlement = await callbacks.settle(callbacks.run(session), `run:${key}`);
+        if (runSettlement.status === "timeout") {
+          if (currentKey === key && generation === workGeneration) {
+            callbacks.reject(session, new Error("Identity work timed out"));
+          }
           return null;
         }
-        accepted.set(identity, result);
-        callbacks.accept(identity, result);
+
+        const result = runSettlement.value;
+        if (currentKey !== key || generation !== workGeneration) {
+          await cleanup(session, result, key);
+          return null;
+        }
+        accepted.set(key, { session, result });
+        callbacks.accept(session, result);
         return result;
       } catch (error) {
-        if (currentIdentity === identity && generation === workGeneration) {
-          callbacks.reject(identity, error);
-        }
+        if (currentKey === key && generation === workGeneration) callbacks.reject(session, error);
         return null;
       }
     })();
-    active.set(identity, work);
+    active.set(key, { session, work });
     void work.finally(() => {
-      if (active.get(identity) === work) active.delete(identity);
+      if (active.get(key)?.work === work) active.delete(key);
     });
     return work;
   }
 
-  async function retire(identity: string): Promise<void> {
-    if (currentIdentity === identity) {
-      currentIdentity = null;
+  async function retire(session: Session): Promise<void> {
+    const key = callbacks.sessionKey(session);
+    if (currentKey === key) {
+      currentKey = null;
       generation += 1;
     }
-    const pending = active.get(identity);
-    if (pending) await pending;
-    if (accepted.has(identity) && callbacks.canCleanup(identity)) {
-      const retiring = accepted.get(identity)!;
-      accepted.delete(identity);
-      await callbacks.cleanup(identity, retiring);
+    const pending = active.get(key);
+    if (pending) {
+      try {
+        await callbacks.settle(pending.work, `retire:${key}`);
+      } catch {
+        // Retirement remains bounded even if the underlying operation rejects.
+      }
+    }
+    const retiring = accepted.get(key);
+    if (retiring) {
+      accepted.delete(key);
+      await cleanup(retiring.session, retiring.result, key);
     }
   }
 

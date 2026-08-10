@@ -23,6 +23,14 @@ function deferred() {
   return { promise, resolve };
 }
 
+async function waitFor(predicate, message) {
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    if (predicate()) return;
+    await Promise.resolve();
+  }
+  assert.fail(message);
+}
+
 async function run() {
   const { createSessionEpoch } = loadTypeScriptModule("src/sessionEpoch.ts");
   const epoch = createSessionEpoch();
@@ -42,55 +50,114 @@ async function run() {
   const registrations = [];
   const cleanups = [];
   const accepted = [];
-  const work = { A: deferred(), B: deferred() };
-  let credentialIdentity = "A";
+  const sessionA = { key: "session-a", identity: "A", credential: "credential-a" };
+  const sessionB = { key: "session-b", identity: "B", credential: "credential-b" };
+  const work = { "session-a": deferred(), "session-b": deferred() };
   const coordinator = createIdentityWorkCoordinator({
-    run: async (identity) => {
-      registrations.push(identity);
-      return work[identity].promise;
+    sessionKey: (session) => session.key,
+    run: async (session) => {
+      registrations.push(`${session.identity}:${session.credential}`);
+      return work[session.key].promise;
     },
-    cleanup: async (identity, result) => cleanups.push(`${identity}:${result.token}`),
-    canCleanup: (identity) => identity === credentialIdentity,
-    accept: (identity) => accepted.push(identity),
+    cleanup: async (session, result) => cleanups.push(`${session.identity}:${session.credential}:${result.token}`),
+    accept: (session) => accepted.push(session.identity),
     reject: () => {},
+    settle: async (promise) => ({ status: "completed", value: await promise }),
   });
 
-  const registrationA = coordinator.activate("A");
+  const registrationA = coordinator.activate(sessionA);
   await Promise.resolve();
-  credentialIdentity = "B";
-  const registrationB = coordinator.activate("B");
-  assert.deepEqual(registrations, ["A"], "B waits for older identity work instead of reusing it");
-  work.A.resolve({ token: "token-a" });
+  const registrationB = coordinator.activate(sessionB);
+  assert.deepEqual(registrations, ["A:credential-a"], "B waits for older identity work instead of reusing it");
+  work["session-a"].resolve({ token: "token-a" });
   await registrationA;
-  await Promise.resolve();
-  assert.deepEqual(registrations, ["A", "B"], "latest identity gets a fresh registration");
-  work.B.resolve({ token: "token-b" });
+  await waitFor(() => registrations.length === 2, "B should begin after stale A cleanup settles");
+  assert.deepEqual(cleanups, ["A:credential-a:token-a"], "stale A cleanup stays bound to A's bearer");
+  assert.deepEqual(registrations, ["A:credential-a", "B:credential-b"], "latest identity gets a fresh registration");
+  work["session-b"].resolve({ token: "token-b" });
   await registrationB;
   assert.deepEqual(accepted, ["B"]);
-  credentialIdentity = "A";
-  await coordinator.retire("A");
-  assert.ok(cleanups.includes("A:token-a"), "stale A work is retained until A credentials can clean it");
+
+  const sessionA2 = { key: "session-a-rotated", identity: "A", credential: "credential-a-rotated" };
+  const rotatedWork = deferred();
+  work[sessionA2.key] = rotatedWork;
+  const registrationA2 = coordinator.activate(sessionA2);
+  await Promise.resolve();
+  rotatedWork.resolve({ token: "token-a-rotated" });
+  await registrationA2;
+  assert.deepEqual(accepted, ["B", "A"], "returning A accepts only its rotated session result");
+  assert.deepEqual(cleanups, ["A:credential-a:token-a"], "old A cannot overwrite or clean with the rotated bearer");
 
   const retiringWork = deferred();
-  credentialIdentity = "C";
+  const sessionC = { key: "session-c", identity: "C", credential: "credential-c" };
   const retiring = createIdentityWorkCoordinator({
+    sessionKey: (session) => session.key,
     run: async () => retiringWork.promise,
-    cleanup: async (identity, result) => cleanups.push(`${identity}:${result.token}`),
-    canCleanup: (identity) => identity === credentialIdentity,
+    cleanup: async (session, result) => cleanups.push(`${session.identity}:${session.credential}:${result.token}`),
     accept: () => {},
     reject: () => {},
+    settle: async (promise) => ({ status: "completed", value: await promise }),
   });
-  const pendingC = retiring.activate("C");
+  const pendingC = retiring.activate(sessionC);
   await Promise.resolve();
-  const retiredC = retiring.retire("C");
+  const retiredC = retiring.retire(sessionC);
   retiringWork.resolve({ token: "token-c" });
   await Promise.all([pendingC, retiredC]);
-  assert.ok(cleanups.includes("C:token-c"), "retirement cleans pending work while C credentials remain active");
+  assert.ok(cleanups.includes("C:credential-c:token-c"), "retirement cleans pending work with C's captured bearer");
+
+  const never = new Promise(() => {});
+  const neverRegistrations = [];
+  const bounded = createIdentityWorkCoordinator({
+    sessionKey: (session) => session.key,
+    run: async (session) => {
+      neverRegistrations.push(session.identity);
+      return session.identity === "A" ? never : { token: "token-b" };
+    },
+    cleanup: async () => {},
+    accept: () => {},
+    reject: () => {},
+    settle: async (promise, label) =>
+      label.includes("session-a") ? { status: "timeout" } : { status: "completed", value: await promise },
+  });
+  const neverA = bounded.activate(sessionA);
+  await Promise.resolve();
+  const boundedB = bounded.activate(sessionB);
+  await Promise.all([neverA, boundedB]);
+  assert.deepEqual(neverRegistrations, ["A", "B"], "B begins after A's deadline even when A never settles");
+  await bounded.retire(sessionA);
+
+  const sessionD = { key: "session-d", identity: "D", credential: "credential-d" };
+  const boundedCleanup = createIdentityWorkCoordinator({
+    sessionKey: (session) => session.key,
+    run: async () => ({ token: "token-d" }),
+    cleanup: async () => never,
+    accept: () => {},
+    reject: () => {},
+    settle: async (promise, label) =>
+      label === "cleanup:session-d" ? { status: "timeout" } : { status: "completed", value: await promise },
+  });
+  await boundedCleanup.activate(sessionD);
+  await boundedCleanup.retire(sessionD);
+
+  const { runWithDeadline } = loadTypeScriptModule("src/promiseDeadline.ts");
+  let abortedSignal;
+  const aborted = await runWithDeadline((signal) => {
+    abortedSignal = signal;
+    return never;
+  }, 0);
+  assert.equal(aborted.status, "timeout");
+  assert.equal(abortedSignal.aborted, true, "timed-out network work is cancelled");
+
+  const client = fs.readFileSync(path.join(root, "src/api/client.ts"), "utf8");
+  const deviceTokens = fs.readFileSync(path.join(root, "src/api/deviceTokens.ts"), "utf8");
 
   const app = fs.readFileSync(path.join(root, "App.tsx"), "utf8");
   const events = fs.readFileSync(path.join(root, "src/hooks/useGameEvents.ts"), "utf8");
   assert.match(app, /sessionEpoch\.retire\(\)/);
   assert.match(app, /runIfCurrent/);
+  assert.match(app, /sessionAccessToken/);
+  assert.match(client, /accessTokenOverride/);
+  assert.match(deviceTokens, /accessToken/);
   assert.match(events, /if \(closed\) return/);
   console.log("task4 lifecycle checks passed");
 }

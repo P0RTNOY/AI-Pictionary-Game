@@ -12,16 +12,26 @@ export type DeviceTokenSummary = {
   updated_at: string;
 };
 
-export function registerDeviceToken(token: string): Promise<DeviceTokenSummary> {
+export function registerDeviceToken(
+  token: string,
+  accessToken: string,
+  signal?: AbortSignal,
+): Promise<DeviceTokenSummary> {
   return apiFetch<DeviceTokenSummary>("/device-tokens", {
     method: "POST",
     body: JSON.stringify({ token, provider: "expo", platform: Platform.OS }),
-  });
+    signal,
+  }, accessToken);
 }
 
-export function unregisterDeviceToken(token: string): Promise<{ unregistered: boolean }> {
+export function unregisterDeviceToken(
+  token: string,
+  accessToken: string,
+  signal?: AbortSignal,
+): Promise<{ unregistered: boolean }> {
   return apiFetch<{ unregistered: boolean }>("/device-tokens/unregister", {
     method: "POST",
     body: JSON.stringify({ token, provider: "expo" }),
-  });
+    signal,
+  }, accessToken);
 }
