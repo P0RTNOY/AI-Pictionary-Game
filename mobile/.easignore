@@ -1,0 +1,14 @@
+# EAS upload exclusions for the mobile project root.
+.env
+.env.*
+!.env.example
+node_modules/
+.expo/
+dist/
+build/
+coverage/
+*.log
+
+# Remote EAS preview/production builds use Continuous Native Generation.
+/android/
+/ios/

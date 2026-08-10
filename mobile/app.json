@@ -36,7 +36,16 @@
     "plugins": [
       "expo-asset",
       "expo-notifications",
-      "expo-font"
+      "expo-font",
+      [
+        "expo-splash-screen",
+        {
+          "backgroundColor": "#FAF7F0",
+          "image": "./assets/app-icon-v2.png",
+          "imageWidth": 160,
+          "resizeMode": "contain"
+        }
+      ]
     ],
     "extra": {
       "appEnv": "local",

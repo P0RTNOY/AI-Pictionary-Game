@@ -1,17 +1,39 @@
+const { isIP } = require("node:net");
+
 const LOCAL_API_URL = "http://localhost:8000";
 const RELEASE_ENVIRONMENTS = new Set(["staging", "production"]);
+
+function isIpv4LoopbackOrUnspecified(hostname) {
+  if (isIP(hostname) !== 4) return false;
+  const octets = hostname.split(".").map(Number);
+  return octets[0] === 127 || octets.every((octet) => octet === 0);
+}
+
+function mappedIpv4Octets(hostname) {
+  const match = hostname.match(/^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/);
+  if (!match) return null;
+
+  const highWord = Number.parseInt(match[1], 16);
+  const lowWord = Number.parseInt(match[2], 16);
+  return [highWord >> 8, highWord & 0xff, lowWord >> 8, lowWord & 0xff];
+}
 
 function isLoopbackUrl(value) {
   try {
     const url = new URL(value);
     const hostname = url.hostname.toLowerCase().replace(/^\[|\]$/g, "");
+    const mappedIpv4 = mappedIpv4Octets(hostname);
     return (
       !["http:", "https:"].includes(url.protocol) ||
       hostname === "localhost" ||
+      hostname === "localhost." ||
       hostname === "::1" ||
+      hostname === "::" ||
       hostname === "0.0.0.0" ||
       hostname.endsWith(".localhost") ||
-      /^127(?:\.\d{1,3}){3}$/.test(hostname)
+      hostname.endsWith(".localhost.") ||
+      isIpv4LoopbackOrUnspecified(hostname) ||
+      (mappedIpv4 !== null && (mappedIpv4[0] === 127 || mappedIpv4.every((octet) => octet === 0)))
     );
   } catch {
     return true;
