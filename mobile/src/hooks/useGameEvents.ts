@@ -28,6 +28,15 @@ export function useGameEvents({
   const reconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
+    seenIds.current.clear();
+    lastId.current = 0;
+    setLastEventId(0);
+    setLastEventType(null);
+    setConnected(false);
+    setFallbackPolling(false);
+  }, [enabled, gameId]);
+
+  useEffect(() => {
     if (!enabled || !gameId) return;
     const activeGameId = gameId;
     let socket: WebSocket | null = null;
@@ -57,6 +66,7 @@ export function useGameEvents({
         if (closed) return;
         socket = new WebSocket(wsUrl(activeGameId, issued.ticket, lastId.current));
       } catch (error) {
+        if (closed) return;
         failures += 1;
         setConnected(false);
         if (failures >= 2) setFallbackPolling(true);
@@ -65,11 +75,13 @@ export function useGameEvents({
         return;
       }
       socket.onopen = () => {
+        if (closed) return;
         failures = 0;
         setConnected(true);
         setFallbackPolling(false);
       };
       socket.onmessage = (message) => {
+        if (closed) return;
         try {
           const parsed = JSON.parse(message.data);
           if (parsed.type === "event") emitDedup([parsed.event]);
@@ -78,6 +90,7 @@ export function useGameEvents({
         }
       };
       socket.onerror = () => {
+        if (closed) return;
         failures += 1;
         captureMessage("WebSocket error", { area: "websocket", gameId: activeGameId, failures });
       };
@@ -100,9 +113,11 @@ export function useGameEvents({
   useEffect(() => {
     if (!fallbackPolling || !enabled || !gameId) return;
     const activeGameId = gameId;
+    let closed = false;
     const interval = setInterval(async () => {
       try {
         const events = await listEvents(activeGameId, lastId.current);
+        if (closed) return;
         const fresh = events.filter((event) => {
           if (seenIds.current.has(event.id)) return false;
           seenIds.current.add(event.id);
@@ -113,10 +128,14 @@ export function useGameEvents({
         });
         if (fresh.length) onEvents(fresh);
       } catch (error) {
+        if (closed) return;
         captureError(error, { area: "event_polling", gameId: activeGameId });
       }
     }, 2500);
-    return () => clearInterval(interval);
+    return () => {
+      closed = true;
+      clearInterval(interval);
+    };
   }, [fallbackPolling, enabled, gameId, onEvents]);
 
   return { connected, fallbackPolling, lastEventId, lastEventType };

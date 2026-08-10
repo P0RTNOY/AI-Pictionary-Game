@@ -26,6 +26,7 @@ import { appDiagnostics } from "./src/config";
 import { parseInviteCodeFromUrl } from "./src/utils/deepLinks";
 import { captureError, captureMessage } from "./src/utils/errorReporter";
 import { decideSessionBootstrap, restoredSessionDestination } from "./src/sessionBootstrap";
+import { createSessionEpoch } from "./src/sessionEpoch";
 
 type Screen = "onboarding" | "home" | "profile_setup" | "edit_profile" | "invites" | "create_round" | "waiting" | "guess" | "result" | "debug" | "startup_error";
 
@@ -53,6 +54,7 @@ export default function App() {
   const [startupLoading, setStartupLoading] = useState(false);
   const [sessionRetiring, setSessionRetiring] = useState(false);
   const lastHandledUrl = useRef<string | null>(null);
+  const sessionEpoch = useRef(createSessionEpoch()).current;
 
   useEffect(() => {
     ensureLocalUser();
@@ -82,12 +84,15 @@ export default function App() {
   useEffect(() => {
     if (!selectedGame || sessionRetiring) return;
     const interval = setInterval(async () => {
+      const capturedEpoch = sessionEpoch.capture();
       try {
         if (!user) return;
         const latest = await getGame(selectedGame.id);
-        setSelectedGame(latest);
-        setSelectedRound(latest.latest_round);
-        routeForGame(latest, false);
+        sessionEpoch.runIfCurrent(capturedEpoch, () => {
+          setSelectedGame(latest);
+          setSelectedRound(latest.latest_round);
+          routeForGame(latest, false);
+        });
       } catch {
         // Keep the current UI if the network blips.
       }
@@ -114,11 +119,12 @@ export default function App() {
   const openGameById = useCallback(
     async (gameId: string) => {
       if (!user) return;
+      const capturedEpoch = sessionEpoch.capture();
       try {
         const game = await getGame(gameId);
-        openGame(game);
+        sessionEpoch.runIfCurrent(capturedEpoch, () => openGame(game));
       } catch (error) {
-        Alert.alert("Could not open game", getErrorMessage(error));
+        sessionEpoch.runIfCurrent(capturedEpoch, () => Alert.alert("Could not open game", getErrorMessage(error)));
       }
     },
     [user?.id],
@@ -136,6 +142,7 @@ export default function App() {
   const selectedLatestRound = useMemo(() => selectedRound ?? selectedGame?.latest_round ?? null, [selectedGame, selectedRound]);
 
   async function ensureLocalUser() {
+    const capturedEpoch = sessionEpoch.capture();
     setStartupLoading(true);
     setStartupError(null);
     let onboardingDone: string | null = null;
@@ -147,7 +154,9 @@ export default function App() {
         AsyncStorage.getItem(SESSION_TOKEN_KEY),
         AsyncStorage.getItem(ONBOARDING_KEY),
       ]);
+      if (!sessionEpoch.isCurrent(capturedEpoch)) return;
     } catch (error) {
+      if (!sessionEpoch.isCurrent(capturedEpoch)) return;
       setStartupError(getErrorMessage(error));
       setScreen("startup_error");
       setStartupLoading(false);
@@ -164,10 +173,13 @@ export default function App() {
     configureApiCredential(storedToken);
     try {
       const existing = await getUser(storedId!);
+      if (!sessionEpoch.isCurrent(capturedEpoch)) return;
+      sessionEpoch.activate();
       setUser(existing);
       setStartupError(null);
       setScreen(restoredSessionDestination(Boolean(pendingInviteCode)));
     } catch (error) {
+      if (!sessionEpoch.isCurrent(capturedEpoch)) return;
       const failure = isUnauthorizedError(error) ? "unauthorized" : "transient";
       if (decideSessionBootstrap(true, true, failure) === "reonboard") {
         await clearStoredSession();
@@ -222,41 +234,50 @@ export default function App() {
   }
 
   async function refreshGames(userId: string) {
+    const capturedEpoch = sessionEpoch.capture();
     setRefreshing(true);
     try {
-      setGames(await listGames(userId));
+      const refreshedGames = await listGames(userId);
+      sessionEpoch.runIfCurrent(capturedEpoch, () => setGames(refreshedGames));
     } catch (error) {
-      captureError(error, { area: "games_refresh", userId });
-      Alert.alert("Could not load games", getErrorMessage(error));
+      sessionEpoch.runIfCurrent(capturedEpoch, () => {
+        captureError(error, { area: "games_refresh", userId });
+        Alert.alert("Could not load games", getErrorMessage(error));
+      });
     } finally {
-      setRefreshing(false);
+      sessionEpoch.runIfCurrent(capturedEpoch, () => setRefreshing(false));
     }
   }
 
   async function refreshSelectedGame(gameId: string, userId: string) {
+    const capturedEpoch = sessionEpoch.capture();
     setSelectedGameLoading(true);
     setSelectedGameError(null);
     try {
       const latest = await getGame(gameId);
+      if (!sessionEpoch.isCurrent(capturedEpoch)) return;
       setSelectedGame(latest);
       setSelectedRound(latest.latest_round);
       refreshStats(gameId, userId);
       routeForGame(latest, false);
       captureMessage("Selected game refreshed", { area: "navigation", gameId, target: screen });
     } catch (error) {
+      if (!sessionEpoch.isCurrent(capturedEpoch)) return;
       captureError(error, { area: "selected_game_refresh", gameId, userId });
       setSelectedGameError(getErrorMessage(error));
       setScreen("waiting");
     } finally {
-      setSelectedGameLoading(false);
+      sessionEpoch.runIfCurrent(capturedEpoch, () => setSelectedGameLoading(false));
     }
   }
 
   async function refreshStats(gameId: string, userId: string) {
+    const capturedEpoch = sessionEpoch.capture();
     try {
-      setSelectedStats(await getGameStats(gameId));
+      const stats = await getGameStats(gameId);
+      sessionEpoch.runIfCurrent(capturedEpoch, () => setSelectedStats(stats));
     } catch {
-      setSelectedStats(null);
+      sessionEpoch.runIfCurrent(capturedEpoch, () => setSelectedStats(null));
     }
   }
 
@@ -297,6 +318,7 @@ export default function App() {
   }
 
   async function retireSessionAndResetClient(unregisterPush: boolean) {
+    sessionEpoch.retire();
     setSessionRetiring(true);
     let resetError: unknown = null;
     try {
@@ -316,6 +338,8 @@ export default function App() {
       setSelectedGameError(null);
       setSelectedGameLoading(false);
       setRefreshing(false);
+      setStartupLoading(false);
+      setStartupError(null);
       lastHandledUrl.current = null;
       setScreen("onboarding");
       setSessionRetiring(false);
@@ -324,6 +348,7 @@ export default function App() {
   }
 
   async function handleInviteJoined(game: Game) {
+    const capturedEpoch = sessionEpoch.capture();
     setPendingInviteCode(null);
     if (!user) return;
     captureMessage("Invite join response", {
@@ -336,6 +361,7 @@ export default function App() {
     setSelectedGameError(null);
     try {
       const [joinedGame, refreshedGames] = await Promise.all([getGame(game.id), listGames(user.id)]);
+      if (!sessionEpoch.isCurrent(capturedEpoch)) return;
       captureMessage("Games refreshed after invite join", { area: "invite_join", gameId: game.id, count: refreshedGames.length });
       setGames(refreshedGames);
       setSelectedGame(joinedGame);
@@ -348,6 +374,7 @@ export default function App() {
         currentTurnUserId: joinedGame.current_turn_user_id,
       });
     } catch (error) {
+      if (!sessionEpoch.isCurrent(capturedEpoch)) return;
       captureError(error, { area: "invite_join_fetch_game", gameId: game.id, userId: user.id });
       setSelectedGame(game);
       setSelectedRound(game.latest_round);
@@ -355,7 +382,7 @@ export default function App() {
       setScreen("waiting");
       refreshGames(user.id);
     } finally {
-      setSelectedGameLoading(false);
+      sessionEpoch.runIfCurrent(capturedEpoch, () => setSelectedGameLoading(false));
     }
   }
 
@@ -418,6 +445,7 @@ export default function App() {
                 AsyncStorage.setItem(SESSION_TOKEN_KEY, session.access_token),
               ]);
               configureApiCredential(session.access_token);
+              sessionEpoch.activate();
               setUser(session.user);
               setScreen(pendingInviteCode ? "invites" : "home");
             }}

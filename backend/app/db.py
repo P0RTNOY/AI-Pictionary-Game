@@ -5,7 +5,7 @@ from collections.abc import Generator
 from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
-from app.config import AUTO_CREATE_TABLES, DATABASE_URL
+from app.config import ACTIVE_DEVICE_TOKEN_LIMIT, AUTO_CREATE_TABLES, DATABASE_URL
 
 
 connect_args = {"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {}
@@ -137,6 +137,16 @@ def _sqlite_device_token_reconciliation_statements(*, include_indexes: bool = Tr
         "SELECT id, ROW_NUMBER() OVER (PARTITION BY provider, token ORDER BY "
         "updated_at DESC, created_at DESC, id DESC) task4_rank FROM device_tokens "
         "WHERE status = 'active') ranked WHERE task4_rank > 1)",
+        "INSERT OR IGNORE INTO task4_device_token_conflict_archive (device_token_id, original_status) "
+        "SELECT id, status FROM (SELECT id, status, ROW_NUMBER() OVER ("
+        "PARTITION BY user_id ORDER BY updated_at DESC, created_at DESC, id DESC"
+        f") task4_rank FROM device_tokens WHERE status = 'active') ranked "
+        f"WHERE task4_rank > {ACTIVE_DEVICE_TOKEN_LIMIT}",
+        "UPDATE device_tokens SET status = 'inactive' WHERE id IN (SELECT id FROM ("
+        "SELECT id, ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY "
+        "updated_at DESC, created_at DESC, id DESC"
+        f") task4_rank FROM device_tokens WHERE status = 'active') ranked "
+        f"WHERE task4_rank > {ACTIVE_DEVICE_TOKEN_LIMIT})",
     ]
     if include_indexes:
         statements.extend(

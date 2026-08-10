@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
+import subprocess
+import sys
 
 import pytest
 from alembic import command
@@ -352,3 +355,91 @@ def test_sqlite_light_migration_does_not_reapply_historical_token_ownership(tmp_
             text("SELECT id FROM device_tokens WHERE status = 'active'")
         ).scalars().all()
         assert active == ["old"]
+
+
+def test_alembic_adopts_task4_objects_created_by_sqlite_startup_compatibility(
+    tmp_path, monkeypatch
+):
+    db_path = tmp_path / "task4-startup-before-alembic.db"
+    database_url = f"sqlite:///{db_path}"
+    monkeypatch.setenv("DATABASE_URL", database_url)
+    config = Config(str(Path(__file__).parents[1] / "alembic.ini"))
+    command.upgrade(config, "20260810_0003")
+
+    from sqlalchemy import create_engine, inspect
+
+    compatibility_engine = create_engine(database_url)
+    startup_environment = os.environ.copy()
+    startup_environment.update(
+        {
+            "DATABASE_URL": database_url,
+            "AUTO_CREATE_TABLES": "true",
+            "ENV": "test",
+        }
+    )
+    subprocess.run(
+        [sys.executable, "-c", "from app.db import init_db; init_db()"],
+        cwd=Path(__file__).parents[1],
+        env=startup_environment,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    before = inspect(compatibility_engine)
+    assert "task4_device_token_conflict_archive" in before.get_table_names()
+    assert "uq_device_tokens_active_provider_token" in {
+        index["name"] for index in before.get_indexes("device_tokens")
+    }
+
+    command.upgrade(config, "head")
+
+    with compatibility_engine.connect() as connection:
+        assert connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == "20260810_0004"
+
+
+def test_task4_migration_caps_existing_active_tokens_per_user_and_restores_them(
+    tmp_path, monkeypatch
+):
+    db_path = tmp_path / "task4-token-limit-migration.db"
+    database_url = f"sqlite:///{db_path}"
+    monkeypatch.setenv("DATABASE_URL", database_url)
+    config = Config(str(Path(__file__).parents[1] / "alembic.ini"))
+    command.upgrade(config, "20260810_0003")
+
+    from sqlalchemy import create_engine
+
+    migrated_engine = create_engine(database_url)
+    with migrated_engine.begin() as connection:
+        connection.execute(
+            text(
+                "INSERT INTO users (id, display_name, avatar_emoji, avatar_color, created_at, updated_at) "
+                "VALUES ('owner', 'Owner', '1', '#fff', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+            )
+        )
+        for index in range(5):
+            connection.execute(
+                text(
+                    "INSERT INTO device_tokens "
+                    "(id, user_id, provider, token, platform, status, created_at, updated_at) "
+                    "VALUES (:id, 'owner', 'expo', :token, 'ios', 'active', :created, :created)"
+                ),
+                {
+                    "id": f"token-{index}",
+                    "token": f"unique-token-{index}",
+                    "created": f"2026-01-0{index + 1} 00:00:00",
+                },
+            )
+
+    command.upgrade(config, "head")
+    with migrated_engine.connect() as connection:
+        active = connection.execute(
+            text("SELECT id FROM device_tokens WHERE status = 'active' ORDER BY id")
+        ).scalars().all()
+        assert active == ["token-2", "token-3", "token-4"]
+
+    command.downgrade(config, "20260810_0003")
+    with migrated_engine.connect() as connection:
+        active = connection.execute(
+            text("SELECT id FROM device_tokens WHERE status = 'active' ORDER BY id")
+        ).scalars().all()
+        assert active == [f"token-{index}" for index in range(5)]

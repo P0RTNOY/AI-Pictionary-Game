@@ -5,6 +5,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { AppState } from "react-native";
 
 import { registerDeviceToken, unregisterDeviceToken } from "../api/deviceTokens";
+import { createIdentityWorkCoordinator, type IdentityWorkCoordinator } from "../identityWorkCoordinator";
 import { captureError } from "../utils/errorReporter";
 
 
@@ -17,6 +18,7 @@ Notifications.setNotificationHandler({
   }),
 });
 
+type PushRegistrationResult = Awaited<ReturnType<typeof register>>;
 
 export function usePushNotifications(
   userId: string | null,
@@ -28,9 +30,36 @@ export function usePushNotifications(
   const [tokenFingerprint, setTokenFingerprint] = useState<string | null>(null);
   const [registrationError, setRegistrationError] = useState<string | null>(null);
   const lastRouteKey = useRef<string | null>(null);
-  const registrationGeneration = useRef(0);
-  const registeredDevice = useRef<{ userId: string; token: string } | null>(null);
-  const activeRegistrationWork = useRef<Promise<void> | null>(null);
+  const credentialIdentity = useRef<string | null>(userId);
+  const previousIdentity = useRef<string | null>(null);
+  const coordinator = useRef<IdentityWorkCoordinator<PushRegistrationResult> | null>(null);
+  credentialIdentity.current = userId;
+  if (!coordinator.current) {
+    coordinator.current = createIdentityWorkCoordinator<PushRegistrationResult>({
+      run: register,
+      cleanup: async (identity, result) => {
+        if (!result.token) return;
+        try {
+          await unregisterDeviceToken(result.token);
+        } catch (error) {
+          captureError(error, { area: "push_unregistration", userId: identity });
+        }
+      },
+      canCleanup: (identity) => credentialIdentity.current === identity,
+      accept: (_identity, result) => {
+        setPermissionStatus(result.permissionStatus);
+        setRegistered(Boolean(result.token));
+        setTokenFingerprint(result.tokenFingerprint);
+        setRegistrationError(null);
+      },
+      reject: (identity, error) => {
+        captureError(error, { area: "push_registration", userId: identity });
+        setRegistered(false);
+        setTokenFingerprint(null);
+        setRegistrationError(error instanceof Error ? error.message : "Push registration failed");
+      },
+    });
+  }
 
   const routeNotification = useCallback(
     (response: Notifications.NotificationResponse | null) => {
@@ -48,43 +77,15 @@ export function usePushNotifications(
 
   const refreshRegistration = useCallback(() => {
     if (!userId || !enabled) return Promise.resolve();
-    if (activeRegistrationWork.current) return activeRegistrationWork.current;
-    const generation = ++registrationGeneration.current;
-    const work = (async () => {
-      try {
-        const result = await register(userId);
-        if (registrationGeneration.current !== generation) {
-          if (result.token) {
-            try {
-              await unregisterDeviceToken(result.token);
-            } catch (error) {
-              captureError(error, { area: "stale_push_unregistration", userId });
-            }
-          }
-          return;
-        }
-        setPermissionStatus(result.permissionStatus);
-        setRegistered(Boolean(result.token));
-        setTokenFingerprint(result.tokenFingerprint);
-        registeredDevice.current = result.token ? { userId, token: result.token } : null;
-        setRegistrationError(null);
-      } catch (error) {
-        if (registrationGeneration.current !== generation) return;
-        captureError(error, { area: "push_registration" });
-        setRegistered(false);
-        setTokenFingerprint(null);
-        setRegistrationError(error instanceof Error ? error.message : "Push registration failed");
-      }
-    })();
-    activeRegistrationWork.current = work;
-    return work.finally(() => {
-      if (activeRegistrationWork.current === work) activeRegistrationWork.current = null;
-    });
+    return coordinator.current!.activate(userId);
   }, [enabled, userId]);
 
   useEffect(() => {
-    registrationGeneration.current += 1;
-    registeredDevice.current = null;
+    const retiredIdentity = previousIdentity.current;
+    previousIdentity.current = userId;
+    if (retiredIdentity && (retiredIdentity !== userId || !enabled)) {
+      void coordinator.current!.retire(retiredIdentity);
+    }
     lastRouteKey.current = null;
     setRegistered(false);
     setTokenFingerprint(null);
@@ -119,22 +120,11 @@ export function usePushNotifications(
   }, [routeNotification]);
 
   const unregisterCurrentToken = useCallback(async () => {
-    const current = registeredDevice.current;
-    registrationGeneration.current += 1;
-    const pendingRegistration = activeRegistrationWork.current;
-    if (pendingRegistration) await pendingRegistration;
-    if (!current) return;
-    try {
-      await unregisterDeviceToken(current.token);
-    } catch (error) {
-      captureError(error, { area: "push_unregistration", userId: current.userId });
-    } finally {
-      if (registeredDevice.current === current) {
-        registeredDevice.current = null;
-        setRegistered(false);
-        setTokenFingerprint(null);
-      }
-    }
+    const currentIdentity = credentialIdentity.current;
+    if (!currentIdentity) return;
+    await coordinator.current!.retire(currentIdentity);
+    setRegistered(false);
+    setTokenFingerprint(null);
   }, []);
 
   return {
