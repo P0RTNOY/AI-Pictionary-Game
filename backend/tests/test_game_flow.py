@@ -225,7 +225,12 @@ def test_device_token_and_mock_notifications(db_session):
     player_2 = services.create_user(db_session, UserCreate(display_name="Noa"))
     token = services.register_device_token(
         db_session,
-        DeviceTokenRegister(user_id=player_2.id, token="ExponentPushToken[dev-token]", platform="ios"),
+        DeviceTokenRegister(
+            user_id=player_2.id,
+            token="ExponentPushToken[dev-token]",
+            platform="ios",
+            registration_id="game-flow-device-token",
+        ),
     )
     assert token.status == "active"
 
@@ -242,11 +247,21 @@ def test_duplicate_device_token_updates_existing_record(db_session):
     player = services.create_user(db_session, UserCreate(display_name="Omer"))
     first = services.register_device_token(
         db_session,
-        DeviceTokenRegister(user_id=player.id, token="ExponentPushToken[same-device]", platform="ios"),
+        DeviceTokenRegister(
+            user_id=player.id,
+            token="ExponentPushToken[same-device]",
+            platform="ios",
+            registration_id="duplicate-device-first",
+        ),
     )
     second = services.register_device_token(
         db_session,
-        DeviceTokenRegister(user_id=player.id, token="ExponentPushToken[same-device]", platform="android"),
+        DeviceTokenRegister(
+            user_id=player.id,
+            token="ExponentPushToken[same-device]",
+            platform="android",
+            registration_id="duplicate-device-second",
+        ),
     )
 
     assert second.id == first.id

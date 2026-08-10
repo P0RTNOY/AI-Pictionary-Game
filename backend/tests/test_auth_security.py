@@ -102,7 +102,15 @@ def test_onboarding_returns_one_time_opaque_session_and_stores_only_its_hash(cli
         ("get", "/games/does-not-matter/events", None),
         ("get", "/rounds/does-not-matter", None),
         ("post", "/invites", {"creator_user_id": "forged"}),
-        ("post", "/device-tokens", {"user_id": "forged", "token": "ExponentPushToken[forged]"}),
+        (
+            "post",
+            "/device-tokens",
+            {
+                "user_id": "forged",
+                "token": "ExponentPushToken[forged]",
+                "registration_id": "missing-bearer-registration",
+            },
+        ),
     ],
 )
 def test_private_http_routes_reject_missing_bearer_with_uniform_challenge(client, method, path, json_body):
@@ -220,14 +228,24 @@ def test_forged_actor_fields_cannot_authorize_mutations(client, db_session):
     forged_token = client.post(
         "/device-tokens",
         headers=bearer(stranger_token),
-        json={"user_id": creator["id"], "token": "ExponentPushToken[attacker]", "platform": "ios"},
+        json={
+            "user_id": creator["id"],
+            "token": "ExponentPushToken[attacker]",
+            "platform": "ios",
+            "registration_id": "forged-token-registration",
+        },
     )
     assert forged_token.status_code == 403
 
     own_token = client.post(
         "/device-tokens",
         headers=bearer(creator_token),
-        json={"user_id": creator["id"], "token": "ExponentPushToken[creator]", "platform": "ios"},
+        json={
+            "user_id": creator["id"],
+            "token": "ExponentPushToken[creator]",
+            "platform": "ios",
+            "registration_id": "creator-token-registration",
+        },
     )
     assert own_token.status_code == 201
 

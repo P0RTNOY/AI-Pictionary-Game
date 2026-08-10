@@ -33,6 +33,17 @@ export function createIdentityWorkCoordinator<Session, Result>(
     }
   }
 
+  function trackRetirement(key: string, operation: () => Promise<void>): Promise<void> {
+    const existing = retiring.get(key);
+    if (existing) return existing;
+    const work = operation();
+    retiring.set(key, work);
+    void work.finally(() => {
+      if (retiring.get(key) === work) retiring.delete(key);
+    });
+    return work;
+  }
+
   function activate(session: Session): Promise<Result | null> {
     const key = callbacks.sessionKey(session);
     const existing = active.get(key);
@@ -40,6 +51,14 @@ export function createIdentityWorkCoordinator<Session, Result>(
 
     currentKey = key;
     const workGeneration = ++generation;
+    const previousAccepted = accepted.get(key);
+    if (previousAccepted && !retiring.has(key)) {
+      accepted.delete(key);
+      trackRetirement(
+        key,
+        () => cleanup(previousAccepted.session, previousAccepted.result, key),
+      );
+    }
     const blockers: Promise<unknown>[] = [...active.entries()]
       .filter(([activeKey]) => activeKey !== key)
       .map(([, entry]) => entry.work);
@@ -86,10 +105,7 @@ export function createIdentityWorkCoordinator<Session, Result>(
       currentKey = null;
       generation += 1;
     }
-    const existing = retiring.get(key);
-    if (existing) return existing;
-
-    const work = (async () => {
+    return trackRetirement(key, async () => {
       const pending = active.get(key);
       if (pending) {
         try {
@@ -103,12 +119,7 @@ export function createIdentityWorkCoordinator<Session, Result>(
         accepted.delete(key);
         await cleanup(acceptedResult.session, acceptedResult.result, key);
       }
-    })();
-    retiring.set(key, work);
-    void work.finally(() => {
-      if (retiring.get(key) === work) retiring.delete(key);
     });
-    return work;
   }
 
   return { activate, retire };

@@ -1033,7 +1033,7 @@ def register_device_token(db: Session, payload: DeviceTokenRegister) -> DeviceTo
         .values(updated_at=UserORM.updated_at)
         .execution_options(synchronize_session=False)
     )
-    if payload.registration_id and db.get(DeviceTokenRetirementORM, payload.registration_id):
+    if db.get(DeviceTokenRetirementORM, payload.registration_id):
         raise HTTPException(status_code=409, detail="Device token registration was retired")
     matching = (
         db.execute(
@@ -1105,7 +1105,7 @@ def unregister_device_token(
     user_id: str,
     provider: str,
     token: str,
-    registration_id: Optional[str] = None,
+    registration_id: str,
 ) -> DeviceTokenUnregisterResponse:
     require_user(db, user_id)
     db.execute(
@@ -1114,7 +1114,7 @@ def unregister_device_token(
         .values(updated_at=UserORM.updated_at)
         .execution_options(synchronize_session=False)
     )
-    if registration_id and not db.get(DeviceTokenRetirementORM, registration_id):
+    if not db.get(DeviceTokenRetirementORM, registration_id):
         db.add(
             DeviceTokenRetirementORM(
                 registration_id=registration_id,
@@ -1124,11 +1124,6 @@ def unregister_device_token(
             )
         )
         db.flush()
-    registration_filters = (
-        (DeviceTokenORM.registration_id == registration_id,)
-        if registration_id
-        else ()
-    )
     record = (
         db.execute(
             select(DeviceTokenORM).where(
@@ -1136,15 +1131,14 @@ def unregister_device_token(
                 DeviceTokenORM.provider == provider,
                 DeviceTokenORM.token == token,
                 DeviceTokenORM.status == "active",
-                *registration_filters,
+                DeviceTokenORM.registration_id == registration_id,
             )
         )
         .scalars()
         .first()
     )
     if not record:
-        if registration_id:
-            db.commit()
+        db.commit()
         return DeviceTokenUnregisterResponse(unregistered=False)
     record.status = "inactive"
     record.updated_at = now()

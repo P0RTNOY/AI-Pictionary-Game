@@ -175,6 +175,28 @@ async function run() {
     "register:credential-a-rotated",
   ]);
 
+  const replacementOrder = [];
+  let replacementAttempt = 0;
+  const replacing = createIdentityWorkCoordinator({
+    sessionKey: (session) => session.key,
+    run: async () => {
+      replacementAttempt += 1;
+      replacementOrder.push(`register:${replacementAttempt}`);
+      return { token: `token-${replacementAttempt}` };
+    },
+    cleanup: async (_session, result) => replacementOrder.push(`cleanup:${result.token}`),
+    accept: () => {},
+    reject: () => {},
+    settle: async (promise) => ({ status: "completed", value: await promise }),
+  });
+  await replacing.activate(sessionB);
+  await replacing.activate(sessionB);
+  assert.deepEqual(
+    replacementOrder,
+    ["register:1", "cleanup:token-1", "register:2"],
+    "same-session refresh retires its accepted token before replacing it",
+  );
+
   const { runWithDeadline } = loadTypeScriptModule("src/promiseDeadline.ts");
   let abortedSignal;
   const aborted = await runWithDeadline((signal) => {
@@ -194,6 +216,7 @@ async function run() {
   assert.match(app, /sessionAccessToken/);
   assert.match(client, /accessTokenOverride/);
   assert.match(deviceTokens, /accessToken/);
+  assert.match(deviceTokens, /registration_id/);
   assert.match(events, /if \(closed\) return/);
   console.log("task4 lifecycle checks passed");
 }

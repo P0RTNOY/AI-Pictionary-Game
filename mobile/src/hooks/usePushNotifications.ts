@@ -22,12 +22,12 @@ Notifications.setNotificationHandler({
 const PUSH_OPERATION_TIMEOUT_MS = 5_000;
 const PUSH_COORDINATOR_TIMEOUT_MS = 30_000;
 let nextPushSessionKey = 0;
+let nextPushRegistrationKey = 0;
 
 type PushSession = {
   key: string;
   identity: string;
   credential: string;
-  registrationId: string;
 };
 
 type PushRegistrationResult = Awaited<ReturnType<typeof register>>;
@@ -47,12 +47,10 @@ export function usePushNotifications(
     () => {
       if (!userId || !accessToken) return null;
       const sessionNumber = ++nextPushSessionKey;
-      const registrationId = createRegistrationId(sessionNumber);
       return {
         key: `${userId}:${sessionNumber}`,
         identity: userId,
         credential: accessToken,
-        registrationId,
       };
     },
     [accessToken, userId],
@@ -72,7 +70,7 @@ export function usePushNotifications(
           const settlement = await runWithDeadline(
             (signal) => unregisterDeviceToken(
               token,
-              session.registrationId,
+              result.registrationId,
               session.credential,
               signal,
             ),
@@ -178,7 +176,10 @@ export function usePushNotifications(
 
 
 async function register(session: PushSession) {
-  if (!Device.isDevice) return { permissionStatus: "simulator", token: null, tokenFingerprint: null };
+  const registrationId = createRegistrationId();
+  if (!Device.isDevice) {
+    return { permissionStatus: "simulator", token: null, tokenFingerprint: null, registrationId };
+  }
   const existing = await requireWithin(
     Notifications.getPermissionsAsync(),
     "Checking notification permission timed out",
@@ -191,7 +192,9 @@ async function register(session: PushSession) {
     );
     status = requested.status;
   }
-  if (status !== "granted") return { permissionStatus: status, token: null, tokenFingerprint: null };
+  if (status !== "granted") {
+    return { permissionStatus: status, token: null, tokenFingerprint: null, registrationId };
+  }
 
   const projectId = Constants.expoConfig?.extra?.eas?.projectId ?? Constants.easConfig?.projectId;
   const expoToken = await requireWithin(
@@ -204,7 +207,7 @@ async function register(session: PushSession) {
   const registration = await runWithDeadline(
     (signal) => registerDeviceToken(
       token,
-      session.registrationId,
+      registrationId,
       session.credential,
       signal,
     ),
@@ -215,7 +218,7 @@ async function register(session: PushSession) {
       await runWithDeadline(
         (signal) => unregisterDeviceToken(
           token,
-          session.registrationId,
+          registrationId,
           session.credential,
           signal,
         ),
@@ -230,6 +233,7 @@ async function register(session: PushSession) {
     permissionStatus: status,
     token,
     tokenFingerprint: registration.value.token_fingerprint,
+    registrationId,
   };
 }
 
@@ -239,6 +243,7 @@ async function requireWithin<Value>(promise: Promise<Value>, timeoutMessage: str
   return settlement.value;
 }
 
-function createRegistrationId(sessionNumber: number): string {
-  return `${Date.now().toString(36)}-${sessionNumber.toString(36)}-${Math.random().toString(36).slice(2)}`;
+function createRegistrationId(): string {
+  const registrationNumber = ++nextPushRegistrationKey;
+  return `${Date.now().toString(36)}-${registrationNumber.toString(36)}-${Math.random().toString(36).slice(2)}`;
 }

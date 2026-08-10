@@ -75,6 +75,7 @@ def test_destructive_reset_requires_debug_auth_confirmation_and_clears_all_state
             user_id=first["id"],
             token="ExponentPushToken[reset-owner]",
             platform="ios",
+            registration_id="reset-owner-registration",
         ),
     )
     services.create_round_for_game(
@@ -123,6 +124,7 @@ def test_device_token_has_one_active_owner_limit_and_idempotent_unregister(db_se
             user_id=first.id,
             token="ExponentPushToken[shared-device]",
             platform="ios",
+            registration_id="shared-device-first",
         ),
     )
     transferred = services.register_device_token(
@@ -131,6 +133,7 @@ def test_device_token_has_one_active_owner_limit_and_idempotent_unregister(db_se
             user_id=second.id,
             token="ExponentPushToken[shared-device]",
             platform="android",
+            registration_id="shared-device-second",
         ),
     )
 
@@ -152,6 +155,7 @@ def test_device_token_has_one_active_owner_limit_and_idempotent_unregister(db_se
                 user_id=second.id,
                 token=f"ExponentPushToken[{suffix}]",
                 platform="ios",
+                registration_id=f"registration-{suffix}",
             ),
         )
     active_count = db_session.scalar(
@@ -163,10 +167,10 @@ def test_device_token_has_one_active_owner_limit_and_idempotent_unregister(db_se
     assert active_count == 2
 
     assert services.unregister_device_token(
-        db_session, second.id, "expo", "ExponentPushToken[three]"
+        db_session, second.id, "expo", "ExponentPushToken[three]", "registration-three"
     ).unregistered is True
     assert services.unregister_device_token(
-        db_session, second.id, "expo", "ExponentPushToken[three]"
+        db_session, second.id, "expo", "ExponentPushToken[three]", "registration-three"
     ).unregistered is False
 
 
@@ -246,10 +250,26 @@ def test_device_token_http_lifecycle_derives_owner_and_never_returns_raw_token(c
     second, second_token = onboard(client, "Second HTTP token owner")
     raw_token = "ExponentPushToken[http-shared-device]"
 
+    assert client.post(
+        "/device-tokens",
+        headers=bearer(first_token),
+        json={"token": raw_token, "platform": "ios"},
+    ).status_code == 422
+    assert client.post(
+        "/device-tokens/unregister",
+        headers=bearer(first_token),
+        json={"token": raw_token},
+    ).status_code == 422
+
     forged = client.post(
         "/device-tokens",
         headers=bearer(first_token),
-        json={"user_id": second["id"], "token": raw_token, "platform": "ios"},
+        json={
+            "user_id": second["id"],
+            "token": raw_token,
+            "platform": "ios",
+            "registration_id": "forged-owner-registration",
+        },
     )
     assert forged.status_code == 403
 
@@ -267,6 +287,11 @@ def test_device_token_http_lifecycle_derives_owner_and_never_returns_raw_token(c
     assert transferred.status_code == 201
     assert "token" not in transferred.json()
     assert len(transferred.json()["token_fingerprint"]) == 12
+    assert client.post(
+        "/device-tokens/unregister",
+        headers=bearer(second_token),
+        json={"token": raw_token},
+    ).status_code == 422
 
     wrong_owner = client.post(
         "/device-tokens/unregister",
